@@ -12,7 +12,7 @@ import { selectCanonical } from "./canonical.js";
 import { findDuplicateClusters } from "./cluster.js";
 import { confidenceTier } from "./confidence.js";
 import { getRepos, loadConfig, loadEnvConfig, parseRepo } from "./config.js";
-import { createEmbeddingProvider, prepareEmbeddingText } from "./embeddings.js";
+import { createEmbeddingProviderFromEnv, prepareEmbeddingText } from "./embeddings.js";
 import { GitHubClient } from "./github.js";
 import { buildHousekeepingManifest } from "./housekeeping.js";
 import { findConfirmedDuplicates } from "./identity.js";
@@ -237,11 +237,7 @@ program
         },
         checkEmbedding: async () => {
           const en = loadEnvConfig();
-          await createEmbeddingProvider({
-            provider: en.EMBEDDING_PROVIDER,
-            apiKey: en.EMBEDDING_API_KEY,
-            model: en.EMBEDDING_MODEL,
-          });
+          await createEmbeddingProviderFromEnv(en);
           return true;
         },
       });
@@ -320,12 +316,25 @@ program
     // 4. Embedding provider reachable
     if (env) {
       try {
-        const embedder = await createEmbeddingProvider({
-          provider: env.EMBEDDING_PROVIDER,
-          apiKey: env.EMBEDDING_API_KEY,
-          model: env.EMBEDDING_MODEL,
-        });
-        pass("embedding", `${env.EMBEDDING_PROVIDER} (${env.EMBEDDING_MODEL}, ${embedder.dimensions} dims)`);
+        const embedder = await createEmbeddingProviderFromEnv(env);
+        const testVector = await embedder.embed("prism doctor connectivity check");
+        const actualDims = testVector.length;
+        const targetDims = env.EMBEDDING_DIMENSIONS;
+
+        if (targetDims && targetDims > actualDims) {
+          warn(
+            "embedding",
+            `${env.EMBEDDING_PROVIDER} (${env.EMBEDDING_MODEL}) returned ${actualDims} dims, but EMBEDDING_DIMENSIONS is set to ${targetDims}`,
+          );
+        } else {
+          const effectiveDims = targetDims || actualDims;
+          const truncationInfo =
+            targetDims && targetDims < actualDims ? ` [native: ${actualDims}, truncated to ${targetDims}]` : "";
+          pass(
+            "embedding",
+            `${env.EMBEDDING_PROVIDER} (${env.EMBEDDING_MODEL}, ${effectiveDims} dims${truncationInfo})`,
+          );
+        }
       } catch (e: any) {
         fail("embedding", e.remedy || e.message);
       }
@@ -658,11 +667,7 @@ program
     const repoFull = `${owner}/${repo}`;
 
     const github = new GitHubClient(env.GITHUB_TOKEN, owner, repo);
-    const embedder = await createEmbeddingProvider({
-      provider: env.EMBEDDING_PROVIDER,
-      apiKey: env.EMBEDDING_API_KEY,
-      model: env.EMBEDDING_MODEL,
-    });
+    const embedder = await createEmbeddingProviderFromEnv(env);
     const store = new VectorStore(undefined, embedder.dimensions, env.EMBEDDING_MODEL);
 
     try {
@@ -937,11 +942,7 @@ program
     const { owner, repo } = parseRepo(repoStr);
     const repoFull = `${owner}/${repo}`;
 
-    const embedder = await createEmbeddingProvider({
-      provider: env.EMBEDDING_PROVIDER,
-      apiKey: env.EMBEDDING_API_KEY,
-      model: env.EMBEDDING_MODEL,
-    });
+    const embedder = await createEmbeddingProviderFromEnv(env);
 
     // open store without model check — we're intentionally changing models
     const store = new VectorStore(undefined, embedder.dimensions);

@@ -56,6 +56,7 @@ const EnvSchema = z.object({
   EMBEDDING_PROVIDER: z.enum(["openai", "kimi", "ollama", "voyageai", "jina"]).default("openai"),
   EMBEDDING_API_KEY: z.string().optional(),
   EMBEDDING_MODEL: z.string().default("text-embedding-3-small"),
+  EMBEDDING_BASE_URL: z.string().url().optional(),
   EMBEDDING_DIMENSIONS: z.coerce.number().optional(),
   LLM_PROVIDER: z.enum(["openai", "kimi", "anthropic", "ollama", "opencode"]).default("openai"),
   LLM_API_KEY: z.string().optional(),

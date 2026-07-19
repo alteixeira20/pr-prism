@@ -10,7 +10,7 @@ export {
   confidenceTier,
 } from "./confidence.js";
 export { getRepos, getVisionDoc, loadConfig, loadEnvConfig, parseRepo } from "./config.js";
-export { createEmbeddingProvider, prepareEmbeddingText } from "./embeddings.js";
+export { createEmbeddingProvider, createEmbeddingProviderFromEnv, prepareEmbeddingText } from "./embeddings.js";
 export { classifyFetchError, classifyHttpError, ProviderError } from "./errors.js";
 export { GitHubClient } from "./github.js";
 export type { PipelineContext } from "./pipeline.js";

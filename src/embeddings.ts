@@ -1,3 +1,4 @@
+import type { EnvConfig } from "./config.js";
 import { classifyFetchError, classifyHttpError, ProviderError } from "./errors.js";
 import type { EmbeddingProvider } from "./types.js";
 
@@ -6,20 +7,33 @@ interface ProviderConfig {
   apiKey?: string;
   model: string;
   baseUrl?: string;
+  dimensions?: number;
 }
 
 class OpenAIEmbeddings implements EmbeddingProvider {
   private apiKey: string;
   private model: string;
   private baseUrl: string;
+  private config: ProviderConfig;
   dimensions = 1536;
 
   constructor(config: ProviderConfig) {
     if (!config.apiKey) throw new Error("EMBEDDING_API_KEY required for OpenAI");
     this.apiKey = config.apiKey;
     this.model = config.model;
-    this.baseUrl = config.baseUrl || "https://api.openai.com/v1";
-    if (config.model.includes("3-large")) this.dimensions = 3072;
+    this.config = config;
+    this.baseUrl = (config.baseUrl || "https://api.openai.com/v1").replace(/\/+$/, "");
+    if (config.model.includes("3-large")) {
+      this.dimensions = 3072;
+    } else if (config.model.includes("3-small") || config.model.includes("ada-002")) {
+      this.dimensions = 1536;
+    } else {
+      this.dimensions = 1536;
+    }
+
+    if (config.dimensions && config.dimensions > this.dimensions) {
+      this.dimensions = config.dimensions;
+    }
   }
 
   async embed(text: string): Promise<number[]> {
@@ -47,7 +61,34 @@ class OpenAIEmbeddings implements EmbeddingProvider {
     }
     if (!resp.ok) {
       const body = await resp.text();
-      throw classifyHttpError("OpenAI Embeddings", resp.status, body, { apiKeyEnvVar: "EMBEDDING_API_KEY" });
+
+      if (process.env.PRISM_DEBUG_PROVIDER === "1") {
+        const lengths = sanitized.map((text) => text.length);
+        const totalCharacters = lengths.reduce((sum, length) => sum + length, 0);
+
+        console.error(
+          JSON.stringify(
+            {
+              provider: "OpenAI Embeddings",
+              status: resp.status,
+              statusText: resp.statusText,
+              model: this.model,
+              endpoint: `${this.baseUrl}/embeddings`,
+              inputCount: sanitized.length,
+              inputLengths: lengths,
+              totalCharacters,
+              responseContentType: resp.headers.get("content-type"),
+              responseBodyPreview: body.slice(0, 1000),
+            },
+            null,
+            2,
+          ),
+        );
+      }
+
+      throw classifyHttpError("OpenAI Embeddings", resp.status, body, {
+        apiKeyEnvVar: "EMBEDDING_API_KEY",
+      });
     }
     const data = (await resp.json()) as any;
     if (!data.data || !Array.isArray(data.data)) {
@@ -57,7 +98,30 @@ class OpenAIEmbeddings implements EmbeddingProvider {
         "Check the API base URL and model name are correct",
       );
     }
-    return data.data.map((d: any) => d.embedding);
+    const embeddings = data.data.map((d: any) => d.embedding);
+
+    if (embeddings.length > 0 && embeddings[0]) {
+      const returnedDim = embeddings[0].length;
+      const hasConfiguredDim = this.config.dimensions !== undefined;
+
+      if (!hasConfiguredDim && returnedDim !== this.dimensions) {
+        throw new ProviderError(
+          "OpenAI Embeddings",
+          `Dimension mismatch: model returned ${returnedDim} dimensions, but provider defaulted to ${this.dimensions}.`,
+          `Set EMBEDDING_DIMENSIONS=${returnedDim} in your .env file and run \`prism reset\` to start fresh.`,
+        );
+      }
+
+      if (hasConfiguredDim && returnedDim < (this.config.dimensions || 0)) {
+        throw new ProviderError(
+          "OpenAI Embeddings",
+          `Dimension mismatch: model returned ${returnedDim} dimensions, but provider was configured to use ${this.config.dimensions}.`,
+          `Set EMBEDDING_DIMENSIONS=${returnedDim} in your .env file and run \`prism reset\` to start fresh.`,
+        );
+      }
+    }
+
+    return embeddings;
   }
 }
 
@@ -201,6 +265,16 @@ class JinaEmbeddings implements EmbeddingProvider {
   embedBatch(texts: string[]) {
     return this.inner.embedBatch(texts);
   }
+}
+
+export async function createEmbeddingProviderFromEnv(env: EnvConfig): Promise<EmbeddingProvider> {
+  return createEmbeddingProvider({
+    provider: env.EMBEDDING_PROVIDER,
+    apiKey: env.EMBEDDING_API_KEY,
+    model: env.EMBEDDING_MODEL,
+    baseUrl: env.EMBEDDING_BASE_URL,
+    dimensions: env.EMBEDDING_DIMENSIONS,
+  });
 }
 
 export async function createEmbeddingProvider(config: ProviderConfig): Promise<EmbeddingProvider> {

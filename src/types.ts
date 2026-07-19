@@ -110,6 +110,7 @@ export interface PipelineContext {
     EMBEDDING_PROVIDER: string;
     EMBEDDING_API_KEY?: string;
     EMBEDDING_MODEL: string;
+    EMBEDDING_BASE_URL?: string;
     EMBEDDING_DIMENSIONS?: number;
     LLM_PROVIDER: string;
     LLM_API_KEY?: string;

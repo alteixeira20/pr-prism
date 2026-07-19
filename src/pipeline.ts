@@ -5,7 +5,8 @@ import Table from "cli-table3";
 import ora from "ora";
 import { findDuplicateClusters } from "./cluster.js";
 import { getRepos, getVisionDoc, loadConfig, loadEnvConfig, parseRepo } from "./config.js";
-import { createEmbeddingProvider, embeddingConfigHash, prepareEmbeddingText } from "./embeddings.js";
+import { createEmbeddingProviderFromEnv, embeddingConfigHash, prepareEmbeddingText } from "./embeddings.js";
+import { ProviderError } from "./errors.js";
 import { GitHubClient } from "./github.js";
 import { applyLabelActions, ensureLabelsExist, type LabelAction } from "./labels.js";
 import { escapeTableCell, sanitizeTitle } from "./sanitize.js";
@@ -52,11 +53,7 @@ export async function createPipelineContext(repoOverride?: string): Promise<Pipe
   const { owner, repo } = parseRepo(repoStr);
   const repoFull = `${owner}/${repo}`;
   const github = new GitHubClient(env.GITHUB_TOKEN, owner, repo);
-  const embedder = await createEmbeddingProvider({
-    provider: env.EMBEDDING_PROVIDER,
-    apiKey: env.EMBEDDING_API_KEY,
-    model: env.EMBEDDING_MODEL,
-  });
+  const embedder = await createEmbeddingProviderFromEnv(env);
   // Matryoshka dimension truncation
   const targetDims = env.EMBEDDING_DIMENSIONS;
   if (targetDims && targetDims > embedder.dimensions) {
@@ -218,6 +215,9 @@ export async function runScan(
         try {
           return await embedder.embedBatch(input);
         } catch (e: any) {
+          if (e instanceof ProviderError && (e.statusCode === 401 || e.statusCode === 403 || e.statusCode === 404)) {
+            throw e;
+          }
           const msg = e.message || "";
           if (msg.includes("429")) {
             const wait = 60 * (attempt + 1);
@@ -237,14 +237,25 @@ export async function runScan(
     let embeddings: number[][];
     try {
       embeddings = await embedWithRetry(texts);
-    } catch {
+    } catch (e: any) {
+      if (e instanceof ProviderError && (e.statusCode === 401 || e.statusCode === 403 || e.statusCode === 404)) {
+        embedSpinner.fail(`Deterministic embedding error: ${e.message}`);
+        throw e;
+      }
       embedSpinner.text = `Batch failed, trying individually... (${embedded}/${newItems.length})`;
       embeddings = [];
       for (const text of texts) {
         try {
           const [single] = await embedWithRetry([text]);
           embeddings.push(single);
-        } catch {
+        } catch (individualErr: any) {
+          if (
+            individualErr instanceof ProviderError &&
+            (individualErr.statusCode === 401 || individualErr.statusCode === 403 || individualErr.statusCode === 404)
+          ) {
+            embedSpinner.fail(`Deterministic embedding error: ${individualErr.message}`);
+            throw individualErr;
+          }
           embeddings.push(new Array(embedder.dimensions).fill(0));
         }
       }

@@ -132,7 +132,7 @@ cross-repo dupe display: `[owner/repo1] #1234 <-> [owner/repo2] #567`
 |------|----------|------|-------|
 | embedding | ollama | free | local, default (nomic-embed-text) |
 | embedding | jina | free tier | 10M tokens/key |
-| embedding | openai | paid | text-embedding-3-small |
+| embedding | openai | paid | text-embedding-3-small, supports custom base URL |
 | embedding | voyageai | paid | |
 | embedding | kimi | free tier | |
 | LLM | opencode | free | kimi-k2.5-free, default |
@@ -140,6 +140,8 @@ cross-repo dupe display: `[owner/repo1] #1234 <-> [owner/repo2] #567`
 | LLM | anthropic | paid | |
 | LLM | kimi | free tier | |
 | LLM | ollama | free | local |
+
+For custom OpenAI-compatible embedding endpoints (e.g. Featherless), configure `EMBEDDING_PROVIDER=openai` and set `EMBEDDING_BASE_URL` in `.env` (generally including the API version prefix, e.g., `/v1`). Specify the model with `EMBEDDING_MODEL` and the database dimension with `EMBEDDING_DIMENSIONS` (which will apply Matryoshka truncation if supported by the model, or check against the native model dimensions).
 
 ## labeling
 

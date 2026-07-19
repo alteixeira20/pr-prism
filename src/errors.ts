@@ -69,7 +69,7 @@ export function classifyHttpError(
 
   switch (status) {
     case 401:
-      return new ProviderError(provider, "Invalid API key", `Check ${envVar} in your .env`);
+      return new ProviderError(provider, "Invalid API key", `Check ${envVar} in your .env`, status);
     case 403: {
       if (provider === "GitHub") {
         if (body.includes("scope") || body.includes("permission")) {
@@ -77,30 +77,42 @@ export function classifyHttpError(
             provider,
             "Token lacks required scopes",
             "Needs `repo` for private repos, `public_repo` for public. Generate at https://github.com/settings/tokens",
+            status,
           );
         }
         return new ProviderError(
           provider,
           "Token invalid or expired",
           "Generate a new PAT at https://github.com/settings/tokens",
+          status,
         );
       }
-      return new ProviderError(provider, `Forbidden (403)`, `Check ${envVar} permissions`);
+      return new ProviderError(provider, `Forbidden (403)`, `Check ${envVar} permissions`, status);
     }
     case 404:
       if (provider === "Ollama") {
         const modelMatch = body.match(/model ['"]?([^'"]+)['"]?/i);
         const model = modelMatch?.[1] || "the requested model";
-        return new ProviderError(provider, `Model not found: ${model}`, `Pull it with: ollama pull ${model}`);
+        return new ProviderError(provider, `Model not found: ${model}`, `Pull it with: ollama pull ${model}`, status);
       }
-      return new ProviderError(provider, `Not found (404): ${body.slice(0, 100)}`, "Check your configuration");
+      return new ProviderError(provider, `Not found (404): ${body.slice(0, 100)}`, "Check your configuration", status);
     case 429:
-      return new ProviderError(provider, "Rate limited", "Waiting before retry...");
+      return new ProviderError(provider, "Rate limited", "Waiting before retry...", status);
     case 500:
     case 502:
     case 503:
-      return new ProviderError(provider, `Server error (${status})`, `${provider} may be down. Try again later`);
+      return new ProviderError(
+        provider,
+        `Server error (${status})`,
+        `${provider} may be down. Try again later`,
+        status,
+      );
     default:
-      return new ProviderError(provider, `Returned ${status}: ${body.slice(0, 200)}`, "Check your .env configuration");
+      return new ProviderError(
+        provider,
+        `Returned ${status}: ${body.slice(0, 200)}`,
+        "Check your .env configuration",
+        status,
+      );
   }
 }
