@@ -240,18 +240,20 @@ describe("closedAt wiring", () => {
   // field or a mapper stops calling it. Both failures are silent: every item
   // hydrates with closedAt undefined, isIncidentClosed returns false for
   // everything, and the whole incident feature dies with all tests green.
-  const source = readFileSync(new URL("../github.ts", import.meta.url), "utf-8");
+  const queriesSource = readFileSync(new URL("../github/graphql/queries.ts", import.meta.url), "utf-8");
+  const itemsSource = readFileSync(new URL("../github/normalization/items.ts", import.meta.url), "utf-8");
 
   it("both GraphQL queries still request closedAt", () => {
-    const queryBlocks = source.split("author { login __typename }").length - 1;
+    const queryBlocks = queriesSource.split("author { login __typename }").length - 1;
     expect(queryBlocks).toBe(2);
-    expect(source.match(/^\s+closedAt$/gm)?.length).toBe(2);
+    expect(queriesSource.match(/^\s+closedAt$/gm)?.length).toBe(2);
   });
 
   it("every PRItem construction site populates closedAt", () => {
-    // Five constructors: 2 GraphQL (pr, issue), 3 REST (pr list, issue list, single pr).
-    const constructions = source.match(/author: \w+\??\.\w+\?\.login \|\| "unknown"/g) ?? [];
-    const closedAtCalls = source.match(/closedAt: itemClosedAt\(/g) ?? [];
+    // Normalization mapping sites: GraphQL PR, GraphQL Issue, REST PR, REST Issue.
+    const constructions = itemsSource.match(/author: \w+\??\.\w+\?\.login \|\| "unknown"/g) ?? [];
+    const closedAtCalls = itemsSource.match(/closedAt: itemClosedAt\(/g) ?? [];
+    expect(constructions.length).toBe(4);
     expect(closedAtCalls.length).toBe(constructions.length);
   });
 });
