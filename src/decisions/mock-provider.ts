@@ -79,7 +79,7 @@ export class MockDecisionProvider implements DecisionProvider {
     const answers: Record<string, DecisionAnswer> = {};
 
     for (const [name, q] of Object.entries(request.questions)) {
-      if (this.options.presetAnswers?.[name]) {
+      if (this.options.presetAnswers && Object.hasOwn(this.options.presetAnswers, name)) {
         answers[name] = this.options.presetAnswers[name];
         continue;
       }

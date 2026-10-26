@@ -8,6 +8,7 @@ import {
   DEFAULT_JEV_MODEL,
   DEFAULT_MAX_BODY,
   DEFAULT_MAX_TITLE,
+  DEFAULT_ROUTING_THRESHOLDS,
   DisabledDecisionProvider,
   evaluateItemDecisions,
   GENERIC_TECHNICAL_DOMAINS,
@@ -19,6 +20,7 @@ import {
   TRIAGE_QUESTIONS,
   TRIAGE_SCHEMA_VERSION,
   validateDecisionAnswer,
+  validateDecisionAnswers,
 } from "../decisions/index.js";
 import { ProviderError } from "../errors.js";
 import type { PRItem } from "../types.js";
@@ -53,6 +55,15 @@ describe("Typed Decision Layer (Phase 1)", () => {
       // Ensure pr-prism specific domains are NOT in the generic default
       expect(criteria.core_engine).toBeUndefined();
       expect(criteria.vector_storage).toBeUndefined();
+    });
+
+    it("exports default routing thresholds with documented calibrated values (Finding 1)", () => {
+      expect(DEFAULT_ROUTING_THRESHOLDS.securityRisk).toBe(0.6);
+      expect(DEFAULT_ROUTING_THRESHOLDS.breakingChangeRisk).toBe(0.6);
+      expect(DEFAULT_ROUTING_THRESHOLDS.investigationNeeded).toBe(0.7);
+      expect(DEFAULT_ROUTING_THRESHOLDS.highTechnicalSeverity).toBe(0.7);
+      expect(DEFAULT_ROUTING_THRESHOLDS.lowEvidenceQuality).toBe(0.25);
+      expect(DEFAULT_ROUTING_THRESHOLDS.routineQualityScore).toBe(0.8);
     });
   });
 
@@ -228,6 +239,37 @@ describe("Typed Decision Layer (Phase 1)", () => {
           { type: "choice", choice: "unpermitted_option", confidence: 0.9 },
         ),
       ).toThrow(ProviderError);
+    });
+
+    it("rejects prototype-chain choices via own-property check (Finding 3)", () => {
+      const q = { type: "choice" as const, instructions: "Category?", criteria: { bug: "Bug", feat: "Feature" } };
+      for (const protoName of [
+        "toString",
+        "constructor",
+        "__proto__",
+        "valueOf",
+        "hasOwnProperty",
+        "isPrototypeOf",
+        "propertyIsEnumerable",
+        "toLocaleString",
+      ]) {
+        expect(() => validateDecisionAnswer("cat", q, { type: "choice", choice: protoName, confidence: 0.9 })).toThrow(
+          ProviderError,
+        );
+      }
+    });
+
+    it("rejects prototype properties in validateDecisionAnswers mapping (Finding 3)", () => {
+      const questions = {
+        item_action: { type: "choice" as const, instructions: "Action?", criteria: { approve: "Approve" } },
+      };
+      // Object inheriting prototype answers should not pass validation for unassigned own properties
+      const inheritedAnswers = Object.create({
+        item_action: { type: "choice", choice: "approve", confidence: 0.9, probabilities: { approve: 0.9 } },
+      });
+      expect(() => validateDecisionAnswers(questions, inheritedAnswers, "Jev")).toThrow(
+        /Missing answer for question "item_action"/,
+      );
     });
 
     it("rejects choice answer with non-finite or out-of-bounds confidence", () => {
@@ -664,9 +706,9 @@ describe("Typed Decision Layer (Phase 1)", () => {
         },
         technical_severity: {
           type: "score",
-          score: 1.5,
+          score: 0.8,
           confidence: 0.85,
-          probabilities: { "1": 0.6, "2": 0.4 },
+          probabilities: { "0": 0.4, "1": 0.6 },
         },
         has_security_risk: { type: "noul", noul: 0.02 },
         has_breaking_change: { type: "noul", noul: 0.05 },
@@ -693,7 +735,7 @@ describe("Typed Decision Layer (Phase 1)", () => {
       expect(report.dimensions.prQuality).toBe(0.88);
       expect(report.dimensions.productRelevance).toBe(0.75);
       expect(report.dimensions.evidenceQuality).toBeCloseTo(0.97, 1);
-      expect(report.dimensions.technicalSeverity).toBe(0.75);
+      expect(report.dimensions.technicalSeverity).toBe(0.4);
       expect(report.dimensions.securityRisk).toBe(0.02);
       expect(report.dimensions.breakingChangeRisk).toBe(0.05);
 
@@ -865,6 +907,239 @@ describe("Typed Decision Layer (Phase 1)", () => {
       expect(report).not.toHaveProperty("approved");
       expect(report).not.toHaveProperty("mutated");
     });
+
+    describe("Finding 1: Conservative Advisory Routing Precedence", () => {
+      it("always routes high security risk to security_escalation even if categorized as documentation", async () => {
+        const mock = new MockDecisionProvider();
+        mock.setPresetAnswers({
+          category: {
+            type: "choice",
+            choice: "documentation",
+            confidence: 0.95,
+            probabilities: { documentation: 0.95 },
+          },
+          has_security_risk: { type: "noul", noul: 0.85 },
+          has_breaking_change: { type: "noul", noul: 0.05 },
+          investigation_needed: { type: "noul", noul: 0.1 },
+        });
+
+        const report = await evaluateItemDecisions(testItem, mock);
+        expect(report.advisoryRoute).toBe("security_escalation");
+        expect(report.reasons[0]).toContain("Security risk flag raised");
+      });
+
+      it("routes high breaking-change risk to expert_investigation even if categorized as documentation", async () => {
+        const mock = new MockDecisionProvider();
+        mock.setPresetAnswers({
+          category: {
+            type: "choice",
+            choice: "documentation",
+            confidence: 0.95,
+            probabilities: { documentation: 0.95 },
+          },
+          has_security_risk: { type: "noul", noul: 0.01 },
+          has_breaking_change: { type: "noul", noul: 0.88 },
+          investigation_needed: { type: "noul", noul: 0.1 },
+        });
+
+        const report = await evaluateItemDecisions(testItem, mock);
+        expect(report.advisoryRoute).toBe("expert_investigation");
+        expect(report.reasons[0]).toContain("High breaking-change risk probability");
+      });
+
+      it("blocks documentation_only routing when technical severity is critical", async () => {
+        const mock = new MockDecisionProvider();
+        mock.setPresetAnswers({
+          category: {
+            type: "choice",
+            choice: "documentation",
+            confidence: 0.95,
+            probabilities: { documentation: 0.95 },
+          },
+          has_security_risk: { type: "noul", noul: 0.01 },
+          has_breaking_change: { type: "noul", noul: 0.01 },
+          investigation_needed: { type: "noul", noul: 0.1 },
+          technical_severity: {
+            type: "score",
+            score: 2.0,
+            confidence: 0.9,
+            probabilities: { "2": 0.9 },
+          },
+        });
+
+        const report = await evaluateItemDecisions(testItem, mock);
+        expect(report.advisoryRoute).toBe("maintainer_triage");
+        expect(report.reasons[0]).toContain("High technical severity (1.00) requires maintainer triage");
+      });
+
+      it("blocks needs_reproduction dismissal when issue technical severity is critical", async () => {
+        const issueItem: PRItem = {
+          ...testItem,
+          type: "issue",
+          hasTests: undefined,
+          additions: undefined,
+          deletions: undefined,
+        };
+
+        const mock = new MockDecisionProvider();
+        mock.setPresetAnswers({
+          reproduction_evidence: { type: "score", score: 0.0, confidence: 0.9, probabilities: { "0": 0.9 } },
+          documentation_completeness: { type: "score", score: 0.0, confidence: 0.9, probabilities: { "0": 0.9 } },
+          has_security_risk: { type: "noul", noul: 0.01 },
+          has_breaking_change: { type: "noul", noul: 0.01 },
+          investigation_needed: { type: "noul", noul: 0.1 },
+          technical_severity: {
+            type: "score",
+            score: 2.0,
+            confidence: 0.95,
+            probabilities: { "2": 0.95 },
+          },
+        });
+
+        const report = await evaluateItemDecisions(issueItem, mock);
+        // High severity must block needs_reproduction dismissal
+        expect(report.advisoryRoute).toBe("maintainer_triage");
+        expect(report.reasons.some((r) => r.includes("High technical severity"))).toBe(true);
+      });
+
+      it("blocks needs_reproduction dismissal when issue has high breaking change risk", async () => {
+        const issueItem: PRItem = {
+          ...testItem,
+          type: "issue",
+          hasTests: undefined,
+          additions: undefined,
+          deletions: undefined,
+        };
+
+        const mock = new MockDecisionProvider();
+        mock.setPresetAnswers({
+          reproduction_evidence: { type: "score", score: 0.0, confidence: 0.9, probabilities: { "0": 0.9 } },
+          documentation_completeness: { type: "score", score: 0.0, confidence: 0.9, probabilities: { "0": 0.9 } },
+          has_security_risk: { type: "noul", noul: 0.01 },
+          has_breaking_change: { type: "noul", noul: 0.85 },
+          investigation_needed: { type: "noul", noul: 0.1 },
+        });
+
+        const report = await evaluateItemDecisions(issueItem, mock);
+        expect(report.advisoryRoute).toBe("expert_investigation");
+        expect(report.reasons[0]).toContain("High breaking-change risk probability");
+      });
+
+      it("blocks routine_review on high-quality PRs when technical severity is critical", async () => {
+        const mock = new MockDecisionProvider();
+        mock.setPresetAnswers({
+          has_security_risk: { type: "noul", noul: 0.01 },
+          has_breaking_change: { type: "noul", noul: 0.01 },
+          investigation_needed: { type: "noul", noul: 0.1 },
+          technical_severity: {
+            type: "score",
+            score: 1.8, // 1.8/2 = 0.9 >= 0.7
+            confidence: 0.9,
+            probabilities: { "2": 0.9 },
+          },
+        });
+
+        const report = await evaluateItemDecisions(testItem, mock, {
+          prQualityScore: 0.95,
+        });
+
+        expect(report.advisoryRoute).toBe("maintainer_triage");
+        expect(report.reasons[0]).toContain("High technical severity");
+      });
+
+      it("blocks routine_review on high-quality PRs when breaking-change risk is elevated", async () => {
+        const mock = new MockDecisionProvider();
+        mock.setPresetAnswers({
+          has_security_risk: { type: "noul", noul: 0.01 },
+          has_breaking_change: { type: "noul", noul: 0.75 },
+          investigation_needed: { type: "noul", noul: 0.1 },
+          technical_severity: {
+            type: "score",
+            score: 0.5,
+            confidence: 0.9,
+            probabilities: { "0": 0.5, "1": 0.5 },
+          },
+        });
+
+        const report = await evaluateItemDecisions(testItem, mock, {
+          prQualityScore: 0.95,
+        });
+
+        expect(report.advisoryRoute).toBe("expert_investigation");
+        expect(report.reasons[0]).toContain("High breaking-change risk probability");
+      });
+
+      it("represents missing technical severity as null and prevents routine/doc-only routing", async () => {
+        const mock = new MockDecisionProvider({ exactPresetAnswers: true });
+        mock.setPresetAnswers({
+          category: {
+            type: "choice",
+            choice: "documentation",
+            confidence: 0.95,
+            probabilities: { documentation: 0.95 },
+          },
+          has_security_risk: { type: "noul", noul: 0.01 },
+          has_breaking_change: { type: "noul", noul: 0.01 },
+          investigation_needed: { type: "noul", noul: 0.01 },
+          // technical_severity is missing
+        });
+
+        const report = await evaluateItemDecisions(testItem, mock, { prQualityScore: 0.95 });
+        expect(report.dimensions.technicalSeverity).toBeNull();
+        expect(report.advisoryRoute).toBe("maintainer_triage");
+        expect(report.reasons.some((r) => r.includes("Mandatory risk assessment incomplete"))).toBe(true);
+      });
+
+      it("respects custom routingThresholds configuration", async () => {
+        const mock = new MockDecisionProvider();
+        mock.setPresetAnswers({
+          has_security_risk: { type: "noul", noul: 0.75 },
+          has_breaking_change: { type: "noul", noul: 0.01 },
+          investigation_needed: { type: "noul", noul: 0.01 },
+          technical_severity: {
+            type: "score",
+            score: 0.5,
+            confidence: 0.9,
+            probabilities: { "0": 0.5, "1": 0.5 },
+          },
+        });
+
+        // Default threshold is 0.6 -> would escalate
+        const defaultReport = await evaluateItemDecisions(testItem, mock);
+        expect(defaultReport.advisoryRoute).toBe("security_escalation");
+
+        // Custom threshold 0.85 -> 0.75 is below threshold
+        const customReport = await evaluateItemDecisions(testItem, mock, {
+          routingThresholds: { securityRisk: 0.85 },
+        });
+        expect(customReport.advisoryRoute).not.toBe("security_escalation");
+      });
+
+      it("rejects prototype-chain choices in evaluator taxonomy and falls back to other (Finding 3)", async () => {
+        const mock = new MockDecisionProvider();
+        mock.setPresetAnswers({
+          category: {
+            type: "choice",
+            choice: "toString",
+            confidence: 0.9,
+            probabilities: {},
+          },
+          technical_domain: {
+            type: "choice",
+            choice: "__proto__",
+            confidence: 0.9,
+            probabilities: {},
+          },
+          has_security_risk: { type: "noul", noul: 0.01 },
+          has_breaking_change: { type: "noul", noul: 0.01 },
+          investigation_needed: { type: "noul", noul: 0.01 },
+        });
+
+        const report = await evaluateItemDecisions(testItem, mock);
+        expect(report.classification.category).toBe("other");
+        expect(report.classification.technicalDomain).toBe("other");
+      });
+    });
   });
 
   describe("Configuration & Provider Activation Contract (P2-2)", () => {
@@ -900,6 +1175,32 @@ describe("Typed Decision Layer (Phase 1)", () => {
       ).rejects.toThrow(ProviderError);
     });
 
+    it("returns DisabledDecisionProvider when enabled is omitted even with API key (Finding 2)", () => {
+      process.env.TYPESAFE_API_KEY = "typesafe_test_key_123456";
+      // No args:
+      const defaultProvider = createDecisionProvider();
+      expect(defaultProvider).toBeInstanceOf(DisabledDecisionProvider);
+      expect(defaultProvider.id).toBe("disabled");
+
+      // With apiKey provided directly:
+      const providerWithKey = createDecisionProvider({
+        apiKey: "typesafe_test_key_123456",
+        provider: "jev",
+      });
+      expect(providerWithKey).toBeInstanceOf(DisabledDecisionProvider);
+      expect(providerWithKey.id).toBe("disabled");
+    });
+
+    it("returns DisabledDecisionProvider when enabled is explicitly false", () => {
+      const provider = createDecisionProvider({
+        enabled: false,
+        apiKey: "typesafe_test_key_123456",
+        provider: "jev",
+      });
+      expect(provider).toBeInstanceOf(DisabledDecisionProvider);
+      expect(provider.id).toBe("disabled");
+    });
+
     it("TYPESAFE_API_KEY being present does not activate Jev when disabled", () => {
       process.env.TYPESAFE_API_KEY = "typesafe_active_key_test";
       const config = loadConfig();
@@ -921,9 +1222,51 @@ describe("Typed Decision Layer (Phase 1)", () => {
       expect(provider.defaultModel).toBe("jev-1.14.0");
     });
 
-    it("creates MockDecisionProvider when provider is mock", () => {
-      const provider = createDecisionProvider({ provider: "mock" });
-      expect(provider.id).toBe("mock");
+    it("throws ProviderError when enabled is true but API key is missing (Finding 2)", () => {
+      delete process.env.TYPESAFE_API_KEY;
+      expect(() =>
+        createDecisionProvider({
+          enabled: true,
+          provider: "jev",
+        }),
+      ).toThrow(ProviderError);
+    });
+
+    it("preserves offline mock provider when explicitly requested without requiring enabled: true (Finding 2)", () => {
+      // Mock with enabled omitted
+      const mockOmitted = createDecisionProvider({ provider: "mock" });
+      expect(mockOmitted).toBeInstanceOf(MockDecisionProvider);
+      expect(mockOmitted.id).toBe("mock");
+
+      // Mock with enabled true
+      const mockEnabled = createDecisionProvider({ provider: "mock", enabled: true });
+      expect(mockEnabled).toBeInstanceOf(MockDecisionProvider);
+      expect(mockEnabled.id).toBe("mock");
+
+      // Mock with enabled false is disabled
+      const mockDisabled = createDecisionProvider({ provider: "mock", enabled: false });
+      expect(mockDisabled).toBeInstanceOf(DisabledDecisionProvider);
+      expect(mockDisabled.id).toBe("disabled");
+    });
+
+    it("makes zero external fetch calls when disabled (Finding 2)", async () => {
+      const mockFetch = vi.fn();
+      const provider = createDecisionProvider({
+        enabled: false,
+        provider: "jev",
+        apiKey: "typesafe_key",
+        fetch: mockFetch as unknown as typeof fetch,
+      });
+
+      expect(provider).toBeInstanceOf(DisabledDecisionProvider);
+      await expect(
+        provider.evaluate({
+          state: "content",
+          questions: { q: { type: "noul", instructions: "q?" } },
+        }),
+      ).rejects.toThrow(ProviderError);
+
+      expect(mockFetch).not.toHaveBeenCalled();
     });
   });
 

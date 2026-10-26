@@ -13,7 +13,7 @@ import type {
 /**
  * Validates that a raw model answer satisfies all constraints for the given question definition:
  * - Answer primitive matches question type
- * - Choice is an explicit member of permitted criteria
+ * - Choice is an explicit own-property member of permitted criteria (rejects toString, constructor, __proto__)
  * - Confidence is a finite number in [0, 1]
  * - Probability values are finite numbers in [0, 1]
  * - Probability distribution sums to approximately 1.0 (within 0.05 tolerance)
@@ -152,7 +152,8 @@ function validateChoiceAnswer(
   }
 
   const permittedKeys = Object.keys(qDef.criteria);
-  if (!(ansObj.choice in qDef.criteria)) {
+  // Own-property check strictly rejects prototype-chain properties like toString, constructor, __proto__
+  if (!Object.hasOwn(qDef.criteria, ansObj.choice)) {
     throw new ProviderError(
       providerName,
       `Invalid choice "${ansObj.choice}" for question "${name}": must be one of [${permittedKeys.join(", ")}]`,
@@ -245,7 +246,8 @@ export function validateDecisionAnswers<Q extends DecisionQuestions>(
   const validated: Record<string, DecisionAnswer> = {};
 
   for (const [name, qDef] of Object.entries(questions)) {
-    validated[name] = validateDecisionAnswer(name, qDef, answersMap[name], providerName);
+    const rawAns = Object.hasOwn(answersMap, name) ? answersMap[name] : undefined;
+    validated[name] = validateDecisionAnswer(name, qDef, rawAns, providerName);
   }
 
   return validated as { [K in keyof Q]: DecisionAnswer };

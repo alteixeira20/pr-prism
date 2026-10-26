@@ -6,10 +6,11 @@ import type { DecisionConfig, DecisionProvider } from "./types.js";
 /**
  * Creates a DecisionProvider according to configuration.
  *
- * Enforces the disabled-provider contract:
- * - If config.enabled is explicitly false, returns DisabledDecisionProvider.
- * - The presence of TYPESAFE_API_KEY in the environment does NOT activate Jev unless
- *   decisions are explicitly enabled.
+ * Enforces the explicit activation contract:
+ * - Jev provider instantiation strictly requires enabled === true.
+ * - When enabled is omitted or false, returns DisabledDecisionProvider without requiring credentials.
+ * - Offline mock usage is preserved when explicitly requested via provider: "mock" (unless enabled === false).
+ * - Zero external requests or paid inference calls are made when disabled.
  */
 export function createDecisionProvider(
   config: DecisionConfig & {
@@ -17,30 +18,34 @@ export function createDecisionProvider(
     mockOptions?: MockProviderOptions;
   } = {},
 ): DecisionProvider {
-  if (config.enabled === false) {
+  // Offline mock usage is preserved when explicitly requested (unless explicitly disabled)
+  if (config.provider === "mock") {
+    if (config.enabled === false) {
+      return new DisabledDecisionProvider();
+    }
+    return new MockDecisionProvider({
+      model: config.model,
+      ...config.mockOptions,
+    });
+  }
+
+  // Jev provider instantiation strictly requires enabled === true
+  if (config.enabled !== true) {
     return new DisabledDecisionProvider();
   }
 
   const provider = config.provider || "jev";
 
-  switch (provider) {
-    case "jev": {
-      const jevConfig: JevProviderConfig = {
-        apiKey: config.apiKey,
-        baseURL: config.baseURL,
-        defaultModel: config.model,
-        timeoutMs: config.timeoutMs,
-        fetch: config.fetch,
-      };
-      return new JevDecisionProvider(jevConfig);
-    }
-    case "mock": {
-      return new MockDecisionProvider({
-        model: config.model,
-        ...config.mockOptions,
-      });
-    }
-    default:
-      throw new Error(`Unknown decision provider: ${provider}. Supported providers are 'jev' and 'mock'.`);
+  if (provider === "jev") {
+    const jevConfig: JevProviderConfig = {
+      apiKey: config.apiKey,
+      baseURL: config.baseURL,
+      defaultModel: config.model,
+      timeoutMs: config.timeoutMs,
+      fetch: config.fetch,
+    };
+    return new JevDecisionProvider(jevConfig);
   }
+
+  throw new Error(`Unknown decision provider: ${provider}. Supported providers are 'jev' and 'mock'.`);
 }

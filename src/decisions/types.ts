@@ -168,6 +168,21 @@ export type AdvisoryRoutingDecision =
   | "documentation_only"
   | "routine_review";
 
+export interface RoutingThresholds {
+  /** Calibrated probability threshold triggering security escalation. Defaults to 0.6. */
+  securityRisk: number;
+  /** Calibrated probability threshold triggering breaking change investigation. Defaults to 0.6. */
+  breakingChangeRisk: number;
+  /** Calibrated probability threshold triggering deep technical investigation. Defaults to 0.7. */
+  investigationNeeded: number;
+  /** Normalized score threshold [0, 1] identifying critical technical severity. Defaults to 0.7. */
+  highTechnicalSeverity: number;
+  /** Threshold below which an issue is flagged as lacking reproduction evidence. Defaults to 0.25. */
+  lowEvidenceQuality: number;
+  /** Deterministic PR quality score threshold enabling routine review. Defaults to 0.8. */
+  routineQualityScore: number;
+}
+
 export interface TriageDecisionReport {
   item: {
     repo: string;
@@ -191,7 +206,7 @@ export interface TriageDecisionReport {
     prQuality?: number;
     productRelevance?: number;
     evidenceQuality: number;
-    technicalSeverity: number;
+    technicalSeverity: number | null;
     securityRisk: number | null;
     breakingChangeRisk: number | null;
   };

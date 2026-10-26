@@ -1,5 +1,6 @@
 export { DisabledDecisionProvider } from "./disabled-provider.js";
 export {
+  DEFAULT_ROUTING_THRESHOLDS,
   type EvaluateItemOptions,
   evaluateItemDecisions,
   GENERIC_TECHNICAL_DOMAINS,
@@ -40,6 +41,7 @@ export type {
   ItemTypeDecision,
   NoulAnswer,
   NoulQuestionDef,
+  RoutingThresholds,
   ScoreAnswer,
   ScoreQuestionDef,
   TechnicalDomainDecision,

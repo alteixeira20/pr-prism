@@ -8,6 +8,7 @@ import type {
   DecisionQuestions,
   ItemTypeDecision,
   NoulAnswer,
+  RoutingThresholds,
   ScoreAnswer,
   TechnicalDomainDecision,
   TriageDecisionReport,
@@ -139,6 +140,18 @@ export const TRIAGE_QUESTIONS: DecisionQuestions = {
   },
 };
 
+/**
+ * Standard thresholds governing conservative advisory route selection.
+ */
+export const DEFAULT_ROUTING_THRESHOLDS: RoutingThresholds = {
+  securityRisk: 0.6,
+  breakingChangeRisk: 0.6,
+  investigationNeeded: 0.7,
+  highTechnicalSeverity: 0.7,
+  lowEvidenceQuality: 0.25,
+  routineQualityScore: 0.8,
+};
+
 export interface EvaluateItemOptions {
   model?: string;
   timeoutMs?: number;
@@ -147,6 +160,8 @@ export interface EvaluateItemOptions {
   customQuestions?: DecisionQuestions;
   /** Configurable technical domain taxonomy criteria. Defaults to GENERIC_TECHNICAL_DOMAINS. */
   technicalDomainCriteria?: Record<string, string | null>;
+  /** Configurable routing thresholds. Defaults to DEFAULT_ROUTING_THRESHOLDS. */
+  routingThresholds?: Partial<RoutingThresholds>;
 }
 
 /**
@@ -160,11 +175,16 @@ export interface EvaluateItemOptions {
  * - Evidence Quality & Completeness (reproduction & description score)
  * - Technical Severity & Risk (failure severity & risk nouls)
  *
- * Security and Authority Invariants:
- * 1. item.type from GitHub is ALWAYS authoritative. Model responses cannot override item.type.
- * 2. Missing risk assessments are represented explicitly as null, never silently assumed to be 0.
- * 3. Unknown, missing, or malformed security-critical assessments escalate for safety review.
- * 4. Model scores NEVER authorize PR closure or autonomous action.
+ * Conservative Routing Precedence:
+ * 1. Security risk: missing/malformed or >= threshold routes to security_escalation.
+ * 2. High breaking-change risk: triggers technical or maintainer investigation.
+ * 3. High technical severity: blocks routine review, doc-only, or needs-reproduction dismissal.
+ * 4. Expert investigation: high investigation probability or agent routing recommendation.
+ * 5. Low evidence quality: issues lacking reproduction steps route to needs_reproduction.
+ * 6. Mandatory assessment completeness: unknown risk fields default to maintainer triage.
+ * 7. Documentation-only: low risk, low severity documentation changes.
+ * 8. Routine review: high quality deterministic PR score with low risk and low severity.
+ * 9. Default fallback: maintainer triage.
  */
 export async function evaluateItemDecisions(
   item: PRItem,
@@ -172,6 +192,10 @@ export async function evaluateItemDecisions(
   options: EvaluateItemOptions = {},
 ): Promise<TriageDecisionReport> {
   const sanitizedState = sanitizeItemForDecision(item);
+  const thresholds: RoutingThresholds = {
+    ...DEFAULT_ROUTING_THRESHOLDS,
+    ...options.routingThresholds,
+  };
 
   // Construct questions catalog honoring configurable technical domain taxonomy
   let questions = options.customQuestions ?? TRIAGE_QUESTIONS;
@@ -206,22 +230,26 @@ export async function evaluateItemDecisions(
   // GitHub item.type is authoritative and cannot be overridden by model-generated answers.
   const itemType: ItemTypeDecision = item.type === "pr" ? "pr" : "issue";
 
-  // Category classification
+  // Category classification using own-property check to reject prototype properties
   const categoryAns = rawAnswers.category as ChoiceAnswer | undefined;
-  const category: CategoryDecision = (categoryAns?.choice as CategoryDecision) || "other";
+  const catDef = questions.category;
+  const validCatCriteria =
+    catDef && catDef.type === "choice" ? catDef.criteria : (TRIAGE_QUESTIONS.category as any).criteria;
+  const rawCategory = categoryAns?.choice;
+  const category: CategoryDecision =
+    rawCategory && Object.hasOwn(validCatCriteria, rawCategory) ? (rawCategory as CategoryDecision) : "other";
 
-  // P2-4: REPOSITORY GENERALITY
-  // Technical domain resolution with generic fallback to "other"
+  // P2-4 & FINDING 3: Technical domain resolution using own-property check
   const domainAns = rawAnswers.technical_domain as ChoiceAnswer | undefined;
   const domainDef = questions.technical_domain;
   const validDomainCriteria = domainDef && domainDef.type === "choice" ? domainDef.criteria : GENERIC_TECHNICAL_DOMAINS;
   const rawDomainChoice = domainAns?.choice;
   const technicalDomain: TechnicalDomainDecision =
-    rawDomainChoice && rawDomainChoice in validDomainCriteria ? rawDomainChoice : "other";
+    rawDomainChoice && Object.hasOwn(validDomainCriteria, rawDomainChoice) ? rawDomainChoice : "other";
 
   // Helper to normalize score against defined rubric level bounds: levels 0..N-1 maps to 0..1
-  const normalizeRubricScore = (ans: ScoreAnswer | undefined, questionKey: string): number => {
-    if (!ans) return 0.5;
+  const normalizeRubricScore = (ans: ScoreAnswer | undefined, questionKey: string): number | null => {
+    if (!ans || typeof ans.score !== "number" || !Number.isFinite(ans.score)) return null;
     const qDef = questions[questionKey];
     const levels = qDef && qDef.type === "score" && Array.isArray(qDef.criteria) ? qDef.criteria.length : 3;
     const maxScore = Math.max(1, levels - 1);
@@ -237,8 +265,8 @@ export async function evaluateItemDecisions(
   const investigationAns = rawAnswers.investigation_needed as NoulAnswer | undefined;
   const routingAns = rawAnswers.candidate_routing as ChoiceAnswer | undefined;
 
-  const reproScoreNorm = normalizeRubricScore(reproAns, "reproduction_evidence");
-  const docScoreNorm = normalizeRubricScore(docAns, "documentation_completeness");
+  const reproScoreNorm = normalizeRubricScore(reproAns, "reproduction_evidence") ?? 0.5;
+  const docScoreNorm = normalizeRubricScore(docAns, "documentation_completeness") ?? 0.5;
   const severityNorm = normalizeRubricScore(severityAns, "technical_severity");
 
   const evidenceQuality = Math.round((reproScoreNorm * 0.7 + docScoreNorm * 0.3) * 100) / 100;
@@ -257,44 +285,84 @@ export async function evaluateItemDecisions(
       ? investigationAns.noul
       : null;
 
-  // Advisory route resolution — purely advisory, never closes
+  // Conservative advisory route resolution — purely advisory, never closes
   const reasons: string[] = [];
   let advisoryRoute: AdvisoryRoutingDecision = "maintainer_triage";
 
   const hasValidSecurity = securityRisk !== null && securityRisk >= 0 && securityRisk <= 1;
   const hasValidBreaking = breakingChangeRisk !== null && breakingChangeRisk >= 0 && breakingChangeRisk <= 1;
   const hasValidInvestigation = investigationNeeded !== null && investigationNeeded >= 0 && investigationNeeded <= 1;
+  const hasValidSeverity = severityNorm !== null && severityNorm >= 0 && severityNorm <= 1;
 
   if (!hasValidSecurity) {
-    // Unknown or malformed security-critical assessment: safe escalation behavior
+    // 1a. Unknown or malformed security-critical assessment: safe escalation behavior
     advisoryRoute = "security_escalation";
     reasons.push("Security risk assessment is unevaluated, missing, or malformed; escalated for safety review");
-  } else if (securityRisk >= 0.6) {
+  } else if (securityRisk >= thresholds.securityRisk) {
+    // 1b. High security risk always receives security escalation
     advisoryRoute = "security_escalation";
     reasons.push(`Security risk flag raised with probability ${securityRisk.toFixed(2)}`);
-  } else if (evidenceQuality < 0.25 && itemType === "issue") {
-    advisoryRoute = "needs_reproduction";
-    reasons.push(`Low reproduction evidence (${evidenceQuality.toFixed(2)}) requires contributor clarification`);
-  } else if ((hasValidInvestigation && investigationNeeded >= 0.7) || routingAns?.choice === "agent_investigate") {
+  } else if (hasValidBreaking && breakingChangeRisk >= thresholds.breakingChangeRisk) {
+    // 2. High breaking-change risk triggers technical investigation
+    advisoryRoute = "expert_investigation";
+    reasons.push(
+      `High breaking-change risk probability ${breakingChangeRisk.toFixed(2)} triggers technical investigation`,
+    );
+  } else if (hasValidSeverity && severityNorm >= thresholds.highTechnicalSeverity) {
+    // 3. High technical severity must not receive routine, documentation-only, or insufficient-evidence dismissal
+    if (
+      (hasValidInvestigation && investigationNeeded >= thresholds.investigationNeeded) ||
+      routingAns?.choice === "agent_investigate"
+    ) {
+      advisoryRoute = "expert_investigation";
+      const probStr = hasValidInvestigation ? `probability ${investigationNeeded.toFixed(2)}` : "agent recommendation";
+      reasons.push(
+        `Critical technical severity (${severityNorm.toFixed(2)}) and investigation ${probStr} indicate expert analysis needed`,
+      );
+    } else {
+      advisoryRoute = "maintainer_triage";
+      reasons.push(
+        `High technical severity (${severityNorm.toFixed(2)}) requires maintainer triage; routine, documentation-only, or insufficient-evidence dismissal blocked`,
+      );
+    }
+  } else if (
+    (hasValidInvestigation && investigationNeeded >= thresholds.investigationNeeded) ||
+    routingAns?.choice === "agent_investigate"
+  ) {
+    // 4. Investigation needed triggers expert investigation
     advisoryRoute = "expert_investigation";
     const probStr = hasValidInvestigation ? `probability ${investigationNeeded.toFixed(2)}` : "agent recommendation";
     reasons.push(`Investigation ${probStr} indicates non-trivial analysis needed`);
-  } else if (!hasValidBreaking || !hasValidInvestigation) {
-    // Incomplete mandatory risk assessments: require complete mandatory assessment fields before routine or doc-only routing
+  } else if (evidenceQuality < thresholds.lowEvidenceQuality && itemType === "issue") {
+    // 5. Insufficient evidence on issues (only reached when technical severity is low/moderate)
+    advisoryRoute = "needs_reproduction";
+    reasons.push(`Low reproduction evidence (${evidenceQuality.toFixed(2)}) requires contributor clarification`);
+  } else if (!hasValidBreaking || !hasValidInvestigation || !hasValidSeverity) {
+    // 6. Incomplete mandatory risk assessments: require complete mandatory assessment fields before routine or doc-only routing
     advisoryRoute = "maintainer_triage";
     const missing: string[] = [];
     if (!hasValidBreaking) missing.push("breaking change risk");
     if (!hasValidInvestigation) missing.push("investigation needed");
+    if (!hasValidSeverity) missing.push("technical severity");
     reasons.push(
       `Mandatory risk assessment incomplete (missing ${missing.join(", ")}); defaulting to maintainer triage`,
     );
   } else if (category === "documentation") {
+    // 7. Safe documentation change (low risk and low severity verified)
     advisoryRoute = "documentation_only";
-    reasons.push("Categorized as documentation; suitable for direct maintainer or docs review");
-  } else if (itemType === "pr" && options.prQualityScore !== undefined && options.prQualityScore >= 0.8) {
+    reasons.push(
+      "Categorized as documentation with low risk and low severity; suitable for direct maintainer or docs review",
+    );
+  } else if (
+    itemType === "pr" &&
+    options.prQualityScore !== undefined &&
+    options.prQualityScore >= thresholds.routineQualityScore
+  ) {
+    // 8. Routine review for high quality PRs (low risk and low severity verified)
     advisoryRoute = "routine_review";
-    reasons.push("High quality deterministic PR score; ready for standard review");
+    reasons.push("High quality deterministic PR score with low risk and low severity; ready for standard review");
   } else {
+    // 9. Standard maintainer triage fallback
     advisoryRoute = "maintainer_triage";
     reasons.push("Standard maintainer review path");
   }

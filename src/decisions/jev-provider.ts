@@ -159,7 +159,7 @@ export class JevDecisionProvider implements DecisionProvider {
     // P1-3: Strict validation for Choice, Score, and Noul answers
     const answers: Record<string, DecisionAnswer> = {};
     for (const [name, q] of Object.entries(request.questions)) {
-      const rawAns = rawResult.answers[name];
+      const rawAns = Object.hasOwn(rawResult.answers, name) ? rawResult.answers[name] : undefined;
       answers[name] = validateDecisionAnswer(name, q, rawAns, "Jev");
     }
 
