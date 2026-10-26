@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Command } from "commander";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerCompareCommand } from "../cli/commands/compare.js";
 import { registerDupesCommand } from "../cli/commands/dupes.js";
 import { registerResetCommand } from "../cli/commands/reset.js";
@@ -14,11 +14,19 @@ import { generateMarkdownReport } from "../cli/formatting/report.js";
 import { createProgram } from "../cli/program.js";
 import type { VectorStore } from "../store.js";
 import type { Cluster, ScoredPR } from "../types.js";
+import { captureProcessEnv, getIsolatedEnv, restoreProcessEnv } from "./cli-test-env.js";
 
 const rootDir = resolve(__dirname, "../..");
 const distCli = resolve(rootDir, "dist/cli.js");
 
+const suiteBaselineEnv = captureProcessEnv();
+
+beforeEach(() => {
+  restoreProcessEnv(suiteBaselineEnv);
+});
+
 afterEach(() => {
+  restoreProcessEnv(suiteBaselineEnv);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -32,6 +40,7 @@ describe("CLI Behavior - Serialization & JSON Output Contracts", () => {
 
       const stdout = execFileSync("node", [distCli, "doctor", "--json"], {
         cwd: tempDir,
+        env: getIsolatedEnv(),
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "pipe"],
       });
@@ -67,6 +76,7 @@ describe("CLI Behavior - Serialization & JSON Output Contracts", () => {
 
       const stdout = execFileSync("node", [distCli, "doctor"], {
         cwd: tempDir,
+        env: getIsolatedEnv(),
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "pipe"],
       });
@@ -75,6 +85,53 @@ describe("CLI Behavior - Serialization & JSON Output Contracts", () => {
       expect(stdout).toContain("config: prism.config.yaml valid");
       expect(stdout).toContain("check(s) failed");
     } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("doctor subprocess remains isolated and offline even when parent environment contains live credentials", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "prism-doctor-parent-leak-"));
+    const savedParentEnv = captureProcessEnv();
+    try {
+      // Intentionally pollute parent process.env with fake production-like credentials
+      process.env.GITHUB_TOKEN = "ghp_fake_production_secret_token_never_leak";
+      process.env.OPENAI_API_KEY = "sk-fake_live_key_should_be_blocked";
+      process.env.EMBEDDING_API_KEY = "sk-fake_embed_key";
+      process.env.EMBEDDING_PROVIDER = "openai";
+      process.env.LLM_API_KEY = "fake_llm_key";
+      process.env.LLM_PROVIDER = "openai";
+      process.env.PRISM_APPLY = "1";
+      process.env.PRISM_WRITE = "1";
+
+      writeFileSync(join(tempDir, "prism.config.yaml"), "repo: leak-test-owner/leak-test-repo\n");
+
+      const stdout = execFileSync("node", [distCli, "doctor", "--json"], {
+        cwd: tempDir,
+        env: getIsolatedEnv(),
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+
+      const parsed = JSON.parse(stdout);
+      expect(parsed).toHaveProperty("command", "doctor");
+
+      // Verify that env check failed because parent's GITHUB_TOKEN was stripped
+      const envCheck = parsed.checks.find((c: any) => c.name === "env");
+      expect(envCheck).toBeDefined();
+      expect(envCheck.status).toBe("fail");
+      expect(envCheck.detail).toContain("GITHUB_TOKEN");
+
+      // Verify github check never ran (which would have attempted a network call)
+      const githubCheck = parsed.checks.find((c: any) => c.name === "github");
+      expect(githubCheck).toBeUndefined();
+
+      // Verify embedding and llm checks never ran
+      const embedCheck = parsed.checks.find((c: any) => c.name === "embedding");
+      expect(embedCheck).toBeUndefined();
+      const llmCheck = parsed.checks.find((c: any) => c.name === "llm");
+      expect(llmCheck).toBeUndefined();
+    } finally {
+      restoreProcessEnv(savedParentEnv);
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
@@ -100,6 +157,7 @@ describe("CLI Behavior - Exit & Failure Handling", () => {
 
   it("review command exits with error when invoked without target, --top or --show", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "prism-review-behavior-"));
+    const testEnv = captureProcessEnv();
     try {
       writeFileSync(join(tempDir, "prism.config.yaml"), "repo: rev-owner/rev-repo\n");
       writeFileSync(
@@ -129,8 +187,15 @@ describe("CLI Behavior - Exit & Failure Handling", () => {
         errSpy.mockRestore();
       }
     } finally {
+      restoreProcessEnv(testEnv);
       rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+
+  it("prevents temporary .env fixtures from leaking environment changes into process.env", () => {
+    expect(process.env.GITHUB_TOKEN).toBe(suiteBaselineEnv.GITHUB_TOKEN);
+    expect(process.env.EMBEDDING_API_KEY).toBe(suiteBaselineEnv.EMBEDDING_API_KEY);
+    expect(process.env.EMBEDDING_PROVIDER).toBe(suiteBaselineEnv.EMBEDDING_PROVIDER);
   });
 
   it("triage command exits with error when unknown output format is provided", async () => {

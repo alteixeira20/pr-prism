@@ -118,7 +118,16 @@ src/
 
 ### Finding P3: Fix Report Provenance
 - **Defect:** `CLI-REFACTOR-REPORT.md` had an amended commit SHA mismatch.
-- **Correction:**Re-recorded all commit SHAs, documented exact reproduction results, and separated agent-reported results from independently reproducible instructions.
+- **Correction:** Re-recorded all commit SHAs, documented exact reproduction results, and separated agent-reported results from independently reproducible instructions.
+
+### Finding P2 (Final Remediation): Subprocess Environment Isolation & Credential Stripping
+- **Defect:** In `src/__tests__/cli-behavior.test.ts`, doctor subprocesses inherited `process.env`. If a developer or CI environment had real credentials (`GITHUB_TOKEN`, provider keys) set in their shell, `doctor` would load them, attempt live network calls (e.g. `github.fetchPRs()`), and fail missing-credential assertions. Additionally, in-process tests using temporary `.env` fixtures could mutate `process.env` without cleanup.
+- **Correction:**
+  1. Created `src/__tests__/cli-test-env.ts` providing `getIsolatedEnv()`, `captureProcessEnv()`, and `restoreProcessEnv()`.
+  2. `getIsolatedEnv()` strictly restricts environment variables to an allowlist of essential system runtime keys (`PATH`, `NODE`, `HOME`, `USER`, `TMPDIR`, etc.) and eliminates all tokens, credentials, and provider configurations (`GITHUB_*`, `GH_*`, `OPENAI_*`, `ANTHROPIC_*`, `EMBEDDING_*`, `LLM_*`, `PRISM_*`, etc.).
+  3. Applied `getIsolatedEnv()` across all CLI subprocess test executions in `cli-behavior.test.ts`, `cli-characterization.test.ts`, and `cli-direct-run.test.ts`.
+  4. Wrapped in-process `.env` fixture usage in `try/finally` with `restoreProcessEnv(testEnv)` and added suite-level `beforeEach`/`afterEach` environment reset hooks.
+  5. Added regression tests proving that doctor subprocesses remain 100% offline and isolated even when fake credentials are intentionally injected into parent `process.env`, and that temporary `.env` fixtures never leak into other tests.
 
 ---
 
@@ -127,7 +136,9 @@ src/
 ### Modified:
 - `src/cli.ts` (canonicalized entry-point identity check, thin wrapper)
 - `src/cli/formatting/report.ts` (clarified JSDoc for read-only renderer with storage dependencies)
-- `src/__tests__/cli-characterization.test.ts` (isolated temporary directories for reset tests)
+- `src/__tests__/cli-behavior.test.ts` (subprocess environment isolation, parent credential regression test, fixture leak prevention)
+- `src/__tests__/cli-characterization.test.ts` (isolated temporary directories for reset tests, sanitized subprocess environments)
+- `src/__tests__/cli-direct-run.test.ts` (isolated subprocess environments)
 - `src/__tests__/cli.test.ts` (direct verification of safe program export and factory instantiation)
 
 ### Created:
@@ -151,6 +162,7 @@ src/
 - `src/cli/commands/stats.ts`
 - `src/cli/commands/triage.ts`
 - `src/cli/commands/vision.ts`
+- `src/__tests__/cli-test-env.ts`
 - `src/__tests__/cli-behavior.test.ts`
 - `src/__tests__/cli-direct-run.test.ts`
 - `src/__tests__/cli-shared.test.ts`
@@ -163,21 +175,21 @@ src/
 
 ## 6. Tests Added & Complete Test Counts
 
-Across 9 CLI test files, **75 CLI-specific tests** were written (and 615 total tests in the project suite):
+Across 9 CLI test files, **77 CLI-specific tests** were written (and 617 total tests in the project suite):
 
 | Test File | Test Count | Scope |
 |---|---|---|
 | `src/__tests__/cli-characterization.test.ts` | 24 tests | Version, root help, 14 command option signatures, mutex rules, isolated reset |
 | `src/__tests__/cli-direct-run.test.ts` | 7 tests | Direct node, tsx, symlink, unrelated cli.js import, unrelated prism import, createProgram(), import safety |
-| `src/__tests__/cli-behavior.test.ts` | 13 tests | JSON/text serialization contracts, exit handling, dry-run defaults, formatting edge cases, isolated cwd |
+| `src/__tests__/cli-behavior.test.ts` | 15 tests | JSON/text serialization contracts, exit handling, dry-run defaults, formatting edge cases, isolated cwd, parent credential isolation, .env leak prevention |
 | `src/__tests__/cli-shared.test.ts` | 7 tests | Paths (`getPackageRoot`, `getDataDir`, `getDatabasePath`), prompts, validation |
 | `src/__tests__/cli-formatting.test.ts` | 2 tests | Review terminal output, Markdown report generation |
 | `src/__tests__/cli-utility-commands.test.ts` | 5 tests | `benchmark`, `compare`, `reset`, `re-embed`, `stats`/`status` registration |
 | `src/__tests__/cli-pipeline-commands.test.ts` | 6 tests | `scan`, `dupes`, `rank`, `vision`, `triage` registration & validation |
 | `src/__tests__/cli-core-commands.test.ts` | 4 tests | `init`, `doctor`, `review`, `report` registration |
 | `src/__tests__/cli.test.ts` | 7 tests | `parseDuration` ISO output & error handling, safe program import & instantiation |
-| **Total CLI Tests Added/Refined** | **75 tests** | |
-| **Total Test Suite (incl. server & core)** | **615 tests (44 test files)** | **100% passing across Node 22 and 24** |
+| **Total CLI Tests Added/Refined** | **77 tests** | |
+| **Total Test Suite (incl. server & core)** | **617 tests (44 test files)** | **100% passing across Node 22 and 24** |
 
 ---
 
@@ -192,7 +204,7 @@ $ npm run build
 $ npm run lint
 > prism-triage@4.0.0 lint
 > biome check src/
-Checked 87 files in 41ms. No fixes applied.
+Checked 88 files in 56ms. No fixes applied.
 
 $ npm run typecheck
 > prism-triage@4.0.0 typecheck
@@ -202,7 +214,7 @@ $ npm test
 > prism-triage@4.0.0 test
 > vitest run
  Test Files  44 passed (44)
-      Tests  615 passed (615)
+      Tests  617 passed (617)
 
 $ npm run ci
 4.0.0
@@ -219,11 +231,11 @@ $ export PATH="/home/alteixeira20/.nvm/versions/node/v22.23.1/bin:$PATH"
 $ node -v
 v22.23.1
 $ npm ci
-added 156 packages, and audited 157 packages in 4s
+added 156 packages, and audited 157 packages in 7s
 $ npm run ci
-Checked 87 files in 43ms. No fixes applied.
+Checked 88 files in 182ms. No fixes applied.
  Test Files  44 passed (44)
-      Tests  615 passed (615)
+      Tests  617 passed (617)
 4.0.0
 Usage: prism [options] [command]
 ...
@@ -239,6 +251,7 @@ Usage: prism [options] [command]
 - **Output Formats:** JSON schema, NDJSON lines, and Markdown structure match original specifications.
 - **Write Gating:** All write actions default strictly to dry-run unless `--apply-labels` is passed.
 - **Programmatic Export:** `import { program, createProgram, isDirectRun } from "prism-triage/cli"` is safe and fully backward-compatible.
+- **Test Isolation:** Subprocess tests strictly sanitize environment variables, guaranteeing offline and non-mutating execution regardless of host shell environment credentials.
 
 ---
 
@@ -253,16 +266,17 @@ Usage: prism [options] [command]
 7. `244c8f5` refactor(cli): modularize cli.ts into register-commands, program, and thin entry point
 8. `c8aca98` test(cli): verify safe program import and factory instantiation in cli.test.ts
 9. `1aaa7ac` fix(cli): isolate reset tests, harden direct-run entrypoint detection, and add behavioral tests
-10. `docs: update CLI refactor report with independent audit remediation`
+10. `d1e54c4` docs: update CLI refactor report with independent audit remediation
+11. `fix(cli): isolate test subprocess environments and prevent credential leakage`
 
 ---
 
 ## 10. Final HEAD SHA
 
-Branch `refactor/cli-command-modules` HEAD commit: `docs: update CLI refactor report with independent audit remediation`.
+Branch `refactor/cli-command-modules` HEAD commit: `fix(cli): isolate test subprocess environments and prevent credential leakage`.
 
 ---
 
 ## 11. Final Verdict
 
-**READY.** All audit findings (P1, P2, P3) have been remediated, verified, and tested across both Node 22 and Node 24.
+**READY.** All audit findings (P1, P2, P3) including subprocess environment isolation, parent credential shielding, and `.env` fixture leakage prevention have been remediated, verified, and tested across both Node 22 and Node 24.

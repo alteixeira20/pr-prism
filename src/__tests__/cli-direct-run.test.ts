@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { createProgram, isDirectRun, program } from "../cli.js";
+import { getIsolatedEnv } from "./cli-test-env.js";
 
 const rootDir = resolve(__dirname, "../..");
 const distCli = resolve(rootDir, "dist/cli.js");
@@ -14,6 +15,7 @@ describe("CLI Direct-Run Detection & Entry Point Identity (P2)", () => {
   it("case 1: direct node dist/cli.js executes as entry point", () => {
     expect(existsSync(distCli)).toBe(true);
     const stdout = execFileSync("node", [distCli, "--version"], {
+      env: getIsolatedEnv(),
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -22,6 +24,7 @@ describe("CLI Direct-Run Detection & Entry Point Identity (P2)", () => {
 
   it("case 2: direct source execution using tsx executes as entry point", () => {
     const stdout = execFileSync("npx", ["tsx", srcCli, "--version"], {
+      env: getIsolatedEnv(),
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -35,6 +38,7 @@ describe("CLI Direct-Run Detection & Entry Point Identity (P2)", () => {
       symlinkSync(distCli, symlinkPath);
 
       const stdout = execFileSync("node", [symlinkPath, "--version"], {
+        env: getIsolatedEnv(),
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "pipe"],
       });
@@ -60,6 +64,7 @@ console.log("hasProgram:" + Boolean(program && program.name() === "prism"));
 
       // Pass arguments that would trigger a Commander parse failure if activated
       const stdout = execFileSync("node", [scriptPath, "some", "unknown", "arguments"], {
+        env: getIsolatedEnv(),
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "pipe"],
       });
@@ -87,6 +92,7 @@ console.log("hasProgram:" + Boolean(program && program.name() === "prism"));
       chmodSync(scriptPath, 0o755);
 
       const stdout = execFileSync("node", [scriptPath, "unknown-subcommand", "--invalid-flag"], {
+        env: getIsolatedEnv(),
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "pipe"],
       });

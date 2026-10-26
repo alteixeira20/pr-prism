@@ -3,12 +3,13 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { getIsolatedEnv } from "./cli-test-env.js";
 
 const rootDir = resolve(__dirname, "../..");
 const distCli = resolve(rootDir, "dist/cli.js");
 const srcCli = resolve(rootDir, "src/cli.ts");
 
-function runCli(args: string[], options: { cwd?: string } = {}) {
+function runCli(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}) {
   const isBuilt = existsSync(distCli);
   const cmd = isBuilt ? "node" : "npx";
   const cmdArgs = isBuilt ? [distCli, ...args] : ["tsx", srcCli, ...args];
@@ -16,6 +17,7 @@ function runCli(args: string[], options: { cwd?: string } = {}) {
   try {
     const stdout = execFileSync(cmd, cmdArgs, {
       cwd: options.cwd || rootDir,
+      env: options.env || getIsolatedEnv(),
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     });
