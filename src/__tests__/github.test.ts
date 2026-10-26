@@ -17,24 +17,113 @@ function fakeOctokit() {
 }
 
 describe("GitHubClient write gate", () => {
-  it("default (dry-run) gate does not call octokit for applyLabel or ensureLabel (leak fix)", async () => {
+  it("default (dry-run) constructor: asserts no Octokit write method executes for applyLabel, removeLabel, or ensureLabel", async () => {
     const client = new GitHubClient("t", "o", "r"); // default gate is dry-run
     const oct = fakeOctokit();
     (client as unknown as { octokit: unknown }).octokit = oct;
+
+    // Execute all three mutations
     await client.applyLabel(5, "bug");
-    await client.ensureLabel("bug", "ffffff", "desc");
+    await client.removeLabel(5, "wontfix");
+    await client.ensureLabel("new-label", "ffffff", "desc");
+
+    // Existence lookup is read-only and allowed
+    expect(oct.issues.getLabel).toHaveBeenCalledTimes(1);
+    expect(oct.issues.getLabel).toHaveBeenCalledWith({ owner: "o", repo: "r", name: "new-label" });
+
+    // Assert NO write methods are called
     expect(oct.issues.addLabels).not.toHaveBeenCalled();
+    expect(oct.issues.removeLabel).not.toHaveBeenCalled();
     expect(oct.issues.createLabel).not.toHaveBeenCalled();
   });
 
-  it("an apply gate does call octokit", async () => {
+  it("default (dry-run) constructor: ensureLabel performs read existence check and skips write when label exists", async () => {
+    const client = new GitHubClient("t", "o", "r");
+    const oct = {
+      issues: {
+        getLabel: vi.fn(async () => ({ data: { name: "existing" } })),
+        createLabel: vi.fn(async () => ({})),
+        addLabels: vi.fn(async () => ({})),
+        removeLabel: vi.fn(async () => ({})),
+      },
+    };
+    (client as unknown as { octokit: unknown }).octokit = oct;
+
+    await client.ensureLabel("existing", "ffffff", "desc");
+
+    expect(oct.issues.getLabel).toHaveBeenCalledTimes(1);
+    expect(oct.issues.createLabel).not.toHaveBeenCalled();
+    expect(oct.issues.addLabels).not.toHaveBeenCalled();
+    expect(oct.issues.removeLabel).not.toHaveBeenCalled();
+  });
+
+  it("authorized apply mode: executes expected Octokit write methods without unexpected additional writes", async () => {
     const client = new GitHubClient("t", "o", "r", createWriteGate("apply"));
     const oct = fakeOctokit();
     (client as unknown as { octokit: unknown }).octokit = oct;
-    await client.applyLabel(5, "bug");
-    await client.ensureLabel("bug", "ffffff", "desc");
+
+    // 1. applyLabel mutation
+    await client.applyLabel(42, "bug");
     expect(oct.issues.addLabels).toHaveBeenCalledTimes(1);
+    expect(oct.issues.addLabels).toHaveBeenCalledWith({
+      owner: "o",
+      repo: "r",
+      issue_number: 42,
+      labels: ["bug"],
+    });
+
+    // 2. removeLabel mutation
+    await client.removeLabel(42, "duplicate");
+    expect(oct.issues.removeLabel).toHaveBeenCalledTimes(1);
+    expect(oct.issues.removeLabel).toHaveBeenCalledWith({
+      owner: "o",
+      repo: "r",
+      issue_number: 42,
+      name: "duplicate",
+    });
+
+    // 3. ensureLabel mutation when label does not exist
+    await client.ensureLabel("enhancement", "00ff00", "Feature requests");
+    expect(oct.issues.getLabel).toHaveBeenCalledTimes(1);
+    expect(oct.issues.getLabel).toHaveBeenCalledWith({
+      owner: "o",
+      repo: "r",
+      name: "enhancement",
+    });
     expect(oct.issues.createLabel).toHaveBeenCalledTimes(1);
+    expect(oct.issues.createLabel).toHaveBeenCalledWith({
+      owner: "o",
+      repo: "r",
+      name: "enhancement",
+      color: "00ff00",
+      description: "Feature requests",
+    });
+
+    // Assert exact call counts — no unexpected additional writes occurred
+    expect(oct.issues.addLabels).toHaveBeenCalledTimes(1);
+    expect(oct.issues.removeLabel).toHaveBeenCalledTimes(1);
+    expect(oct.issues.createLabel).toHaveBeenCalledTimes(1);
+    expect(oct.issues.getLabel).toHaveBeenCalledTimes(1);
+  });
+
+  it("authorized apply mode: ensureLabel performs read and avoids createLabel when label already exists", async () => {
+    const client = new GitHubClient("t", "o", "r", createWriteGate("apply"));
+    const oct = {
+      issues: {
+        getLabel: vi.fn(async () => ({ data: { name: "already-exists" } })),
+        createLabel: vi.fn(async () => ({})),
+        addLabels: vi.fn(async () => ({})),
+        removeLabel: vi.fn(async () => ({})),
+      },
+    };
+    (client as unknown as { octokit: unknown }).octokit = oct;
+
+    await client.ensureLabel("already-exists", "000000", "Existing description");
+
+    expect(oct.issues.getLabel).toHaveBeenCalledTimes(1);
+    expect(oct.issues.createLabel).not.toHaveBeenCalled();
+    expect(oct.issues.addLabels).not.toHaveBeenCalled();
+    expect(oct.issues.removeLabel).not.toHaveBeenCalled();
   });
 });
 

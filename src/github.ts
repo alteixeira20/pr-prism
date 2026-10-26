@@ -11,7 +11,6 @@
  */
 
 export { GitHubClient } from "./github/client.js";
-export * from "./github/index.js";
 export {
   accountIsBot,
   itemClosedAt,

@@ -3,12 +3,16 @@ import * as githubPackage from "../github/index.js";
 import * as githubFacade from "../github.js";
 
 describe("GitHubClient public API compatibility", () => {
-  it("exports all expected facade contracts from src/github.ts", () => {
+  it("exports all expected facade contracts from src/github.ts and no internal leakages", () => {
     expect(typeof githubFacade.GitHubClient).toBe("function");
     expect(typeof githubFacade.restPRState).toBe("function");
     expect(typeof githubFacade.itemClosedAt).toBe("function");
     expect(typeof githubFacade.accountIsBot).toBe("function");
     expect(typeof githubFacade.mapClosingIssues).toBe("function");
+
+    // Exact runtime exports check: verify no internal operation functions leak through facade
+    const facadeExports = Object.keys(githubFacade).sort();
+    expect(facadeExports).toEqual(["GitHubClient", "accountIsBot", "itemClosedAt", "mapClosingIssues", "restPRState"]);
   });
 
   it("exports modular building blocks from src/github/index.ts", () => {
@@ -47,6 +51,8 @@ describe("GitHubClient public API compatibility", () => {
       "estimateAPICallsNeeded",
       "formatRateLimitWarning",
     ];
+
+    expect(expectedMethods).toHaveLength(19);
 
     for (const method of expectedMethods) {
       expect(typeof (client as any)[method]).toBe("function");
