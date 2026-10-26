@@ -21,6 +21,7 @@ import {
   TRIAGE_SCHEMA_VERSION,
   validateDecisionAnswer,
   validateDecisionAnswers,
+  validateRoutingThresholds,
 } from "../decisions/index.js";
 import { ProviderError } from "../errors.js";
 import type { PRItem } from "../types.js";
@@ -57,7 +58,7 @@ describe("Typed Decision Layer (Phase 1)", () => {
       expect(criteria.vector_storage).toBeUndefined();
     });
 
-    it("exports default routing thresholds with documented calibrated values (Finding 1)", () => {
+    it("exports default routing thresholds with documented heuristic values (Finding 1)", () => {
       expect(DEFAULT_ROUTING_THRESHOLDS.securityRisk).toBe(0.6);
       expect(DEFAULT_ROUTING_THRESHOLDS.breakingChangeRisk).toBe(0.6);
       expect(DEFAULT_ROUTING_THRESHOLDS.investigationNeeded).toBe(0.7);
@@ -1090,6 +1091,96 @@ describe("Typed Decision Layer (Phase 1)", () => {
         expect(report.reasons.some((r) => r.includes("Mandatory risk assessment incomplete"))).toBe(true);
       });
 
+      it("requires complete mandatory assessments before needs_reproduction on low-evidence issues", async () => {
+        const issueItem: PRItem = {
+          ...testItem,
+          type: "issue",
+          hasTests: undefined,
+          additions: undefined,
+          deletions: undefined,
+        };
+
+        // 1. Missing technical_severity with low reproduction evidence
+        const mockMissingSeverity = new MockDecisionProvider({ exactPresetAnswers: true });
+        mockMissingSeverity.setPresetAnswers({
+          reproduction_evidence: { type: "score", score: 0.0, confidence: 0.9, probabilities: { "0": 0.9 } },
+          documentation_completeness: { type: "score", score: 0.0, confidence: 0.9, probabilities: { "0": 0.9 } },
+          has_security_risk: { type: "noul", noul: 0.01 },
+          has_breaking_change: { type: "noul", noul: 0.01 },
+          investigation_needed: { type: "noul", noul: 0.01 },
+          // technical_severity is omitted
+        });
+        const repSeverity = await evaluateItemDecisions(issueItem, mockMissingSeverity);
+        expect(repSeverity.advisoryRoute).toBe("maintainer_triage");
+        expect(
+          repSeverity.reasons.some((r) =>
+            r.includes("Mandatory risk assessment incomplete (missing technical severity)"),
+          ),
+        ).toBe(true);
+
+        // 2. Missing has_breaking_change with low reproduction evidence
+        const mockMissingBreaking = new MockDecisionProvider({ exactPresetAnswers: true });
+        mockMissingBreaking.setPresetAnswers({
+          reproduction_evidence: { type: "score", score: 0.0, confidence: 0.9, probabilities: { "0": 0.9 } },
+          documentation_completeness: { type: "score", score: 0.0, confidence: 0.9, probabilities: { "0": 0.9 } },
+          has_security_risk: { type: "noul", noul: 0.01 },
+          // has_breaking_change is omitted
+          investigation_needed: { type: "noul", noul: 0.01 },
+          technical_severity: { type: "score", score: 0.2, confidence: 0.9, probabilities: { "0": 0.9 } },
+        });
+        const repBreaking = await evaluateItemDecisions(issueItem, mockMissingBreaking);
+        expect(repBreaking.advisoryRoute).toBe("maintainer_triage");
+        expect(
+          repBreaking.reasons.some((r) =>
+            r.includes("Mandatory risk assessment incomplete (missing breaking change risk)"),
+          ),
+        ).toBe(true);
+
+        // 3. Missing investigation_needed with low reproduction evidence
+        const mockMissingInvestigation = new MockDecisionProvider({ exactPresetAnswers: true });
+        mockMissingInvestigation.setPresetAnswers({
+          reproduction_evidence: { type: "score", score: 0.0, confidence: 0.9, probabilities: { "0": 0.9 } },
+          documentation_completeness: { type: "score", score: 0.0, confidence: 0.9, probabilities: { "0": 0.9 } },
+          has_security_risk: { type: "noul", noul: 0.01 },
+          has_breaking_change: { type: "noul", noul: 0.01 },
+          // investigation_needed is omitted
+          technical_severity: { type: "score", score: 0.2, confidence: 0.9, probabilities: { "0": 0.9 } },
+        });
+        const repInvestigation = await evaluateItemDecisions(issueItem, mockMissingInvestigation);
+        expect(repInvestigation.advisoryRoute).toBe("maintainer_triage");
+        expect(
+          repInvestigation.reasons.some((r) =>
+            r.includes("Mandatory risk assessment incomplete (missing investigation needed)"),
+          ),
+        ).toBe(true);
+
+        // 4. Missing both technical_severity and has_breaking_change
+        const mockMissingMultiple = new MockDecisionProvider({ exactPresetAnswers: true });
+        mockMissingMultiple.setPresetAnswers({
+          reproduction_evidence: { type: "score", score: 0.0, confidence: 0.9, probabilities: { "0": 0.9 } },
+          documentation_completeness: { type: "score", score: 0.0, confidence: 0.9, probabilities: { "0": 0.9 } },
+          has_security_risk: { type: "noul", noul: 0.01 },
+          // both breaking change and severity omitted
+          investigation_needed: { type: "noul", noul: 0.01 },
+        });
+        const repMultiple = await evaluateItemDecisions(issueItem, mockMissingMultiple);
+        expect(repMultiple.advisoryRoute).toBe("maintainer_triage");
+        expect(repMultiple.reasons.some((r) => r.includes("Mandatory risk assessment incomplete"))).toBe(true);
+
+        // 5. Complete mandatory risk assessments allows needs_reproduction on low evidence
+        const mockComplete = new MockDecisionProvider();
+        mockComplete.setPresetAnswers({
+          reproduction_evidence: { type: "score", score: 0.0, confidence: 0.9, probabilities: { "0": 0.9 } },
+          documentation_completeness: { type: "score", score: 0.0, confidence: 0.9, probabilities: { "0": 0.9 } },
+          has_security_risk: { type: "noul", noul: 0.01 },
+          has_breaking_change: { type: "noul", noul: 0.01 },
+          investigation_needed: { type: "noul", noul: 0.01 },
+          technical_severity: { type: "score", score: 0.2, confidence: 0.9, probabilities: { "0": 0.9 } },
+        });
+        const repComplete = await evaluateItemDecisions(issueItem, mockComplete);
+        expect(repComplete.advisoryRoute).toBe("needs_reproduction");
+      });
+
       it("respects custom routingThresholds configuration", async () => {
         const mock = new MockDecisionProvider();
         mock.setPresetAnswers({
@@ -1138,6 +1229,127 @@ describe("Typed Decision Layer (Phase 1)", () => {
         const report = await evaluateItemDecisions(testItem, mock);
         expect(report.classification.category).toBe("other");
         expect(report.classification.technicalDomain).toBe("other");
+      });
+    });
+
+    describe("Routing Threshold Validation & Security Escalation Protection", () => {
+      it("validates correct custom threshold configurations within [0, 1]", () => {
+        const validated = validateRoutingThresholds({
+          securityRisk: 0.75,
+          breakingChangeRisk: 0.55,
+          investigationNeeded: 0.65,
+          highTechnicalSeverity: 0.85,
+          lowEvidenceQuality: 0.3,
+          routineQualityScore: 0.9,
+        });
+
+        expect(validated.securityRisk).toBe(0.75);
+        expect(validated.breakingChangeRisk).toBe(0.55);
+        expect(validated.investigationNeeded).toBe(0.65);
+        expect(validated.highTechnicalSeverity).toBe(0.85);
+        expect(validated.lowEvidenceQuality).toBe(0.3);
+        expect(validated.routineQualityScore).toBe(0.9);
+      });
+
+      it("rejects NaN in threshold configuration without silent clamping", () => {
+        expect(() => validateRoutingThresholds({ securityRisk: Number.NaN })).toThrow(
+          /Invalid routing threshold for "securityRisk": expected a finite number within \[0, 1\], received NaN/,
+        );
+        expect(() => validateRoutingThresholds({ routineQualityScore: Number.NaN })).toThrow(
+          /Invalid routing threshold for "routineQualityScore": expected a finite number within \[0, 1\], received NaN/,
+        );
+      });
+
+      it("rejects positive and negative Infinity in threshold configuration", () => {
+        expect(() => validateRoutingThresholds({ securityRisk: Number.POSITIVE_INFINITY })).toThrow(
+          /Invalid routing threshold for "securityRisk": expected a finite number within \[0, 1\], received Infinity/,
+        );
+        expect(() => validateRoutingThresholds({ breakingChangeRisk: Number.NEGATIVE_INFINITY })).toThrow(
+          /Invalid routing threshold for "breakingChangeRisk": expected a finite number within \[0, 1\], received -Infinity/,
+        );
+      });
+
+      it("rejects negative threshold values without silent clamping", () => {
+        expect(() => validateRoutingThresholds({ securityRisk: -0.01 })).toThrow(
+          /Invalid routing threshold for "securityRisk": expected a finite number within \[0, 1\], received -0.01/,
+        );
+        expect(() => validateRoutingThresholds({ highTechnicalSeverity: -1 })).toThrow(
+          /Invalid routing threshold for "highTechnicalSeverity": expected a finite number within \[0, 1\], received -1/,
+        );
+      });
+
+      it("rejects threshold values greater than 1 without silent clamping", () => {
+        expect(() => validateRoutingThresholds({ securityRisk: 1.01 })).toThrow(
+          /Invalid routing threshold for "securityRisk": expected a finite number within \[0, 1\], received 1.01/,
+        );
+        expect(() => validateRoutingThresholds({ routineQualityScore: 999 })).toThrow(
+          /Invalid routing threshold for "routineQualityScore": expected a finite number within \[0, 1\], received 999/,
+        );
+      });
+
+      it("rejects non-numeric runtime values in threshold configuration", () => {
+        expect(() => validateRoutingThresholds({ securityRisk: "0.5" as any })).toThrow(
+          /Invalid routing threshold for "securityRisk": expected a finite number within \[0, 1\]/,
+        );
+        expect(() => validateRoutingThresholds({ securityRisk: true as any })).toThrow(
+          /Invalid routing threshold for "securityRisk": expected a finite number within \[0, 1\]/,
+        );
+        expect(() => validateRoutingThresholds({ securityRisk: null as any })).toThrow(
+          /Invalid routing threshold for "securityRisk": expected a finite number within \[0, 1\]/,
+        );
+        expect(() => validateRoutingThresholds({ securityRisk: undefined as any })).toThrow(
+          /Invalid routing threshold for "securityRisk": expected a finite number within \[0, 1\]/,
+        );
+        expect(() => validateRoutingThresholds("not an object" as any)).toThrow(
+          /Routing thresholds configuration must be an object/,
+        );
+      });
+
+      it("rejects unknown routing threshold keys", () => {
+        expect(() => validateRoutingThresholds({ unknown_key: 0.5 } as any)).toThrow(
+          /Unknown routing threshold "unknown_key"/,
+        );
+        expect(() => validateRoutingThresholds({ security_risk: 0.5 } as any)).toThrow(
+          /Unknown routing threshold "security_risk"/,
+        );
+      });
+
+      it("proves invalid overrides cannot disable security escalation in evaluateItemDecisions", async () => {
+        const mock = new MockDecisionProvider();
+        mock.setPresetAnswers({
+          has_security_risk: { type: "noul", noul: 0.85 },
+          has_breaking_change: { type: "noul", noul: 0.01 },
+          investigation_needed: { type: "noul", noul: 0.01 },
+          technical_severity: { type: "score", score: 0.5, confidence: 0.9, probabilities: { "0": 0.5, "1": 0.5 } },
+        });
+
+        // Attempting to disable security escalation by setting securityRisk to an out-of-bounds number (e.g. 999)
+        await expect(
+          evaluateItemDecisions(testItem, mock, {
+            routingThresholds: { securityRisk: 999 },
+          }),
+        ).rejects.toThrow(/Invalid routing threshold for "securityRisk"/);
+
+        // Attempting to disable security escalation with Infinity
+        await expect(
+          evaluateItemDecisions(testItem, mock, {
+            routingThresholds: { securityRisk: Number.POSITIVE_INFINITY },
+          }),
+        ).rejects.toThrow(/Invalid routing threshold for "securityRisk"/);
+
+        // Attempting to disable security escalation with NaN
+        await expect(
+          evaluateItemDecisions(testItem, mock, {
+            routingThresholds: { securityRisk: Number.NaN },
+          }),
+        ).rejects.toThrow(/Invalid routing threshold for "securityRisk"/);
+
+        // Attempting to pass invalid non-numeric string
+        await expect(
+          evaluateItemDecisions(testItem, mock, {
+            routingThresholds: { securityRisk: "disabled" as any },
+          }),
+        ).rejects.toThrow(/Invalid routing threshold for "securityRisk"/);
       });
     });
   });

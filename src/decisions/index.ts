@@ -7,6 +7,7 @@ export {
   PR_PRISM_TECHNICAL_DOMAINS,
   TRIAGE_QUESTIONS,
   TRIAGE_SCHEMA_VERSION,
+  validateRoutingThresholds,
 } from "./evaluator.js";
 export { createDecisionProvider } from "./factory.js";
 export { DEFAULT_JEV_MODEL, JevDecisionProvider, type JevProviderConfig } from "./jev-provider.js";

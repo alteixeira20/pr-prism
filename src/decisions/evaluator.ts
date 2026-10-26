@@ -141,7 +141,8 @@ export const TRIAGE_QUESTIONS: DecisionQuestions = {
 };
 
 /**
- * Standard thresholds governing conservative advisory route selection.
+ * Standard heuristic thresholds governing conservative advisory route selection
+ * until empirical distribution calibration against repository data is available.
  */
 export const DEFAULT_ROUTING_THRESHOLDS: RoutingThresholds = {
   securityRisk: 0.6,
@@ -151,6 +152,62 @@ export const DEFAULT_ROUTING_THRESHOLDS: RoutingThresholds = {
   lowEvidenceQuality: 0.25,
   routineQualityScore: 0.8,
 };
+
+/**
+ * Set of supported routing threshold keys.
+ */
+const VALID_ROUTING_THRESHOLD_KEYS = new Set<keyof RoutingThresholds>([
+  "securityRisk",
+  "breakingChangeRisk",
+  "investigationNeeded",
+  "highTechnicalSeverity",
+  "lowEvidenceQuality",
+  "routineQualityScore",
+]);
+
+/**
+ * Validates that every configured routing threshold is a finite number within [0, 1].
+ * Rejects NaN, Infinity, negative values, values > 1, and non-numeric runtime types.
+ * Does not silently clamp invalid configurations.
+ */
+export function validateRoutingThresholds(
+  customThresholds?: Partial<RoutingThresholds> | Record<string, unknown>,
+): RoutingThresholds {
+  if (customThresholds !== undefined && customThresholds !== null) {
+    if (typeof customThresholds !== "object" || Array.isArray(customThresholds)) {
+      throw new Error("Routing thresholds configuration must be an object");
+    }
+
+    for (const [key, val] of Object.entries(customThresholds)) {
+      if (!VALID_ROUTING_THRESHOLD_KEYS.has(key as keyof RoutingThresholds)) {
+        throw new Error(
+          `Unknown routing threshold "${key}". Supported thresholds are: [${Array.from(VALID_ROUTING_THRESHOLD_KEYS).join(", ")}]`,
+        );
+      }
+      if (typeof val !== "number" || !Number.isFinite(val) || Number.isNaN(val) || val < 0 || val > 1) {
+        throw new Error(
+          `Invalid routing threshold for "${key}": expected a finite number within [0, 1], received ${String(val)}`,
+        );
+      }
+    }
+  }
+
+  const merged: RoutingThresholds = {
+    ...DEFAULT_ROUTING_THRESHOLDS,
+    ...customThresholds,
+  };
+
+  for (const key of VALID_ROUTING_THRESHOLD_KEYS) {
+    const val = merged[key];
+    if (typeof val !== "number" || !Number.isFinite(val) || Number.isNaN(val) || val < 0 || val > 1) {
+      throw new Error(
+        `Invalid routing threshold for "${key}": expected a finite number within [0, 1], received ${String(val)}`,
+      );
+    }
+  }
+
+  return merged;
+}
 
 export interface EvaluateItemOptions {
   model?: string;
@@ -180,8 +237,8 @@ export interface EvaluateItemOptions {
  * 2. High breaking-change risk: triggers technical or maintainer investigation.
  * 3. High technical severity: blocks routine review, doc-only, or needs-reproduction dismissal.
  * 4. Expert investigation: high investigation probability or agent routing recommendation.
- * 5. Low evidence quality: issues lacking reproduction steps route to needs_reproduction.
- * 6. Mandatory assessment completeness: unknown risk fields default to maintainer triage.
+ * 5. Mandatory assessment completeness: incomplete risk/severity fields default to maintainer triage.
+ * 6. Low evidence quality: issues lacking reproduction steps route to needs_reproduction (only when all mandatory risk assessments are complete and confirmed low/moderate).
  * 7. Documentation-only: low risk, low severity documentation changes.
  * 8. Routine review: high quality deterministic PR score with low risk and low severity.
  * 9. Default fallback: maintainer triage.
@@ -192,10 +249,7 @@ export async function evaluateItemDecisions(
   options: EvaluateItemOptions = {},
 ): Promise<TriageDecisionReport> {
   const sanitizedState = sanitizeItemForDecision(item);
-  const thresholds: RoutingThresholds = {
-    ...DEFAULT_ROUTING_THRESHOLDS,
-    ...options.routingThresholds,
-  };
+  const thresholds: RoutingThresholds = validateRoutingThresholds(options.routingThresholds);
 
   // Construct questions catalog honoring configurable technical domain taxonomy
   let questions = options.customQuestions ?? TRIAGE_QUESTIONS;
@@ -333,12 +387,8 @@ export async function evaluateItemDecisions(
     advisoryRoute = "expert_investigation";
     const probStr = hasValidInvestigation ? `probability ${investigationNeeded.toFixed(2)}` : "agent recommendation";
     reasons.push(`Investigation ${probStr} indicates non-trivial analysis needed`);
-  } else if (evidenceQuality < thresholds.lowEvidenceQuality && itemType === "issue") {
-    // 5. Insufficient evidence on issues (only reached when technical severity is low/moderate)
-    advisoryRoute = "needs_reproduction";
-    reasons.push(`Low reproduction evidence (${evidenceQuality.toFixed(2)}) requires contributor clarification`);
   } else if (!hasValidBreaking || !hasValidInvestigation || !hasValidSeverity) {
-    // 6. Incomplete mandatory risk assessments: require complete mandatory assessment fields before routine or doc-only routing
+    // 5. Incomplete mandatory risk assessments: require complete mandatory assessment fields before needs_reproduction, routine or doc-only routing
     advisoryRoute = "maintainer_triage";
     const missing: string[] = [];
     if (!hasValidBreaking) missing.push("breaking change risk");
@@ -347,6 +397,10 @@ export async function evaluateItemDecisions(
     reasons.push(
       `Mandatory risk assessment incomplete (missing ${missing.join(", ")}); defaulting to maintainer triage`,
     );
+  } else if (evidenceQuality < thresholds.lowEvidenceQuality && itemType === "issue") {
+    // 6. Insufficient evidence on issues (only reached when all mandatory risk assessments are complete and confirmed low/moderate)
+    advisoryRoute = "needs_reproduction";
+    reasons.push(`Low reproduction evidence (${evidenceQuality.toFixed(2)}) requires contributor clarification`);
   } else if (category === "documentation") {
     // 7. Safe documentation change (low risk and low severity verified)
     advisoryRoute = "documentation_only";

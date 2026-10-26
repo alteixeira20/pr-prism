@@ -59,6 +59,7 @@ export {
   TRIAGE_SCHEMA_VERSION,
   validateDecisionAnswer,
   validateDecisionAnswers,
+  validateRoutingThresholds,
 } from "./decisions/index.js";
 export { createEmbeddingProvider, prepareEmbeddingText } from "./embeddings.js";
 export { classifyFetchError, classifyHttpError, ProviderError } from "./errors.js";
