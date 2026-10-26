@@ -12,20 +12,19 @@ import {
   TypeSafeError,
 } from "@typesafe-ai/sdk";
 import { ProviderError } from "../errors.js";
-import { computeStateHash } from "./sanitize.js";
+import { computeDecisionIdentity, computeRubricHash, computeStateHash } from "./sanitize.js";
 import type {
-  ChoiceAnswer,
   ChoiceQuestionDef,
+  DecisionAnswer,
   DecisionProvider,
   DecisionQuestions,
   DecisionRequest,
   DecisionRequestOptions,
   DecisionResult,
-  NoulAnswer,
   NoulQuestionDef,
-  ScoreAnswer,
   ScoreQuestionDef,
 } from "./types.js";
+import { validateDecisionAnswer } from "./validation.js";
 
 export interface JevProviderConfig {
   apiKey?: string;
@@ -79,6 +78,8 @@ export class JevDecisionProvider implements DecisionProvider {
     }
 
     const inputHash = computeStateHash(state);
+    const schemaVersion = request.schemaVersion || "1.0.0";
+    const rubricHash = computeRubricHash(request.questions, schemaVersion);
     const timeout = options.timeoutMs ?? this.timeoutMs;
     const model = request.model || this.defaultModel;
 
@@ -155,79 +156,30 @@ export class JevDecisionProvider implements DecisionProvider {
       );
     }
 
-    // Adapt and validate every answer
-    const answers: Record<string, any> = {};
+    // P1-3: Strict validation for Choice, Score, and Noul answers
+    const answers: Record<string, DecisionAnswer> = {};
     for (const [name, q] of Object.entries(request.questions)) {
       const rawAns = rawResult.answers[name];
-      if (!rawAns) {
-        throw new ProviderError(
-          "Jev",
-          `Missing answer for question "${name}"`,
-          "Model did not return a result for this question.",
-        );
-      }
-
-      switch (q.type) {
-        case "choice": {
-          if (typeof rawAns.choice !== "string" || typeof rawAns.confidence !== "number") {
-            throw new ProviderError(
-              "Jev",
-              `Malformed choice answer for "${name}"`,
-              "Expected string choice and numeric confidence.",
-            );
-          }
-          const choiceAns: ChoiceAnswer = {
-            type: "choice",
-            choice: rawAns.choice,
-            confidence: Number(rawAns.confidence),
-            probabilities: rawAns.probabilities && typeof rawAns.probabilities === "object" ? rawAns.probabilities : {},
-          };
-          answers[name] = choiceAns;
-          break;
-        }
-        case "score": {
-          if (typeof rawAns.score !== "number" || typeof rawAns.confidence !== "number") {
-            throw new ProviderError(
-              "Jev",
-              `Malformed score answer for "${name}"`,
-              "Expected numeric score and confidence.",
-            );
-          }
-          const scoreAns: ScoreAnswer = {
-            type: "score",
-            score: Number(rawAns.score),
-            confidence: Number(rawAns.confidence),
-            probabilities: rawAns.probabilities && typeof rawAns.probabilities === "object" ? rawAns.probabilities : {},
-            legend: rawAns.legend,
-          };
-          answers[name] = scoreAns;
-          break;
-        }
-        case "noul": {
-          if (typeof rawAns.noul !== "number" || Number.isNaN(rawAns.noul)) {
-            throw new ProviderError(
-              "Jev",
-              `Malformed noul answer for "${name}"`,
-              "Expected numeric probability between 0 and 1.",
-            );
-          }
-          const noulAns: NoulAnswer = {
-            type: "noul",
-            noul: Math.max(0, Math.min(1, Number(rawAns.noul))),
-          };
-          answers[name] = noulAns;
-          break;
-        }
-      }
+      answers[name] = validateDecisionAnswer(name, q, rawAns, "Jev");
     }
+
+    const resolvedModel = rawResult.model || model;
+    const decisionIdentity = computeDecisionIdentity({
+      inputHash,
+      rubricHash,
+      model: resolvedModel,
+      schemaVersion,
+    });
 
     return {
       answers: answers as any,
       provenance: {
         provider: "jev",
-        model: rawResult.model || model,
+        model: resolvedModel,
         inputHash,
-        decisionSchemaVersion: request.schemaVersion || "1.0.0",
+        decisionSchemaVersion: schemaVersion,
+        rubricHash,
+        decisionIdentity,
         usage: {
           inputTokens: rawResult.usage?.input_tokens ?? null,
           outputTokens: rawResult.usage?.output_tokens ?? null,

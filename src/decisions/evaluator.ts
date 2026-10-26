@@ -16,10 +16,41 @@ import type {
 export const TRIAGE_SCHEMA_VERSION = "1.0.0";
 
 /**
+ * Universal repository technical domain taxonomy.
+ * Provides a generic default taxonomy applicable to arbitrary software repositories.
+ */
+export const GENERIC_TECHNICAL_DOMAINS: Record<string, string | null> = {
+  core_logic: "Core application logic, business rules, features, data processing, or algorithms",
+  api_service: "HTTP/RPC APIs, backend endpoints, network services, webhook listeners, or auth",
+  ui_ux: "User interfaces, frontend web/desktop/mobile components, CLI interactions, or output display",
+  data_storage: "Database schemas, persistence, storage engines, models, migrations, or caching",
+  integrations: "Third-party services, external clients, SDK integrations, or hardware interfaces",
+  ci_infra: "Build systems, CI/CD pipelines, containerization, deployment configs, or packaging",
+  documentation: "Documentation, user guides, specifications, code comments, or tutorials",
+  other: "Areas not matching the specific domains listed above",
+};
+
+/**
+ * PR-Prism repository-specific technical domain taxonomy.
+ * Retained for self-triage of the pr-prism codebase or custom configuration.
+ */
+export const PR_PRISM_TECHNICAL_DOMAINS: Record<string, string | null> = {
+  core_engine: "Core triage pipeline, clustering, ranking, scoring, or algorithms",
+  api_server: "Webhook server, Hono routes, GitHub event handling, or HTTP auth",
+  cli_ux: "Command-line interface commands, terminal tables, flags, or output formatting",
+  vector_storage: "SQLite, sqlite-vec, embeddings storage, migrations, or database schemas",
+  git_integration: "GitHub API integration, GraphQL queries, REST clients, or Octokit",
+  ci_build: "GitHub Actions workflows, build scripts, npm publishing, or dependencies",
+  docs: "Documentation files, architecture specifications, or READMEs",
+  other: "Areas not matching the specific domains listed",
+};
+
+/**
  * Standard triage decision questions catalog.
  * Bounded questions evaluating distinct semantic dimensions.
- * Note: Trusted GitHub metadata (such as item type pr vs issue) is resolved
- * deterministically and is NOT queried via model inference.
+ *
+ * Trusted GitHub metadata (such as item type pr vs issue) is resolved
+ * deterministically from GitHub and is NOT queried via model inference.
  */
 export const TRIAGE_QUESTIONS: DecisionQuestions = {
   category: {
@@ -39,16 +70,7 @@ export const TRIAGE_QUESTIONS: DecisionQuestions = {
   technical_domain: {
     type: "choice",
     instructions: "Which technical domain of the repository does this item primarily touch?",
-    criteria: {
-      core_engine: "Core triage pipeline, clustering, ranking, scoring, or algorithms",
-      api_server: "Webhook server, Hono routes, GitHub event handling, or HTTP auth",
-      cli_ux: "Command-line interface commands, terminal tables, flags, or output formatting",
-      vector_storage: "SQLite, sqlite-vec, embeddings storage, migrations, or database schemas",
-      git_integration: "GitHub API integration, GraphQL queries, REST clients, or Octokit",
-      ci_build: "GitHub Actions workflows, build scripts, npm publishing, or dependencies",
-      docs: "Documentation files, architecture specifications, or READMEs",
-      other: "Areas not matching the specific domains listed",
-    },
+    criteria: GENERIC_TECHNICAL_DOMAINS,
   },
   reproduction_evidence: {
     type: "score",
@@ -123,10 +145,12 @@ export interface EvaluateItemOptions {
   prQualityScore?: number;
   productRelevanceScore?: number;
   customQuestions?: DecisionQuestions;
+  /** Configurable technical domain taxonomy criteria. Defaults to GENERIC_TECHNICAL_DOMAINS. */
+  technicalDomainCriteria?: Record<string, string | null>;
 }
 
 /**
- * Evaluates an untrusted PR/issue item against the standard decision questions
+ * Evaluates an untrusted PR/issue item against the decision questions
  * using the provided DecisionProvider.
  *
  * Produces a structured TriageDecisionReport maintaining strict separation
@@ -136,7 +160,11 @@ export interface EvaluateItemOptions {
  * - Evidence Quality & Completeness (reproduction & description score)
  * - Technical Severity & Risk (failure severity & risk nouls)
  *
- * Note: Model scores NEVER authorize PR closure or autonomous action.
+ * Security and Authority Invariants:
+ * 1. item.type from GitHub is ALWAYS authoritative. Model responses cannot override item.type.
+ * 2. Missing risk assessments are represented explicitly as null, never silently assumed to be 0.
+ * 3. Unknown, missing, or malformed security-critical assessments escalate for safety review.
+ * 4. Model scores NEVER authorize PR closure or autonomous action.
  */
 export async function evaluateItemDecisions(
   item: PRItem,
@@ -144,7 +172,21 @@ export async function evaluateItemDecisions(
   options: EvaluateItemOptions = {},
 ): Promise<TriageDecisionReport> {
   const sanitizedState = sanitizeItemForDecision(item);
-  const questions = options.customQuestions ?? TRIAGE_QUESTIONS;
+
+  // Construct questions catalog honoring configurable technical domain taxonomy
+  let questions = options.customQuestions ?? TRIAGE_QUESTIONS;
+  if (options.technicalDomainCriteria && !options.customQuestions) {
+    questions = {
+      ...TRIAGE_QUESTIONS,
+      technical_domain: {
+        type: "choice",
+        instructions:
+          TRIAGE_QUESTIONS.technical_domain?.instructions ||
+          "Which technical domain of the repository does this item primarily touch?",
+        criteria: options.technicalDomainCriteria,
+      },
+    };
+  }
 
   const result = await provider.evaluate(
     {
@@ -160,17 +202,22 @@ export async function evaluateItemDecisions(
 
   const rawAnswers = result.answers;
 
-  // Extract classification answers with fallbacks.
-  // Item type is trusted GitHub metadata; only use model answer if custom questions explicitly included it.
-  const itemTypeAns = rawAnswers.item_type as ChoiceAnswer | undefined;
+  // P1-1: TRUSTED METADATA
+  // GitHub item.type is authoritative and cannot be overridden by model-generated answers.
+  const itemType: ItemTypeDecision = item.type === "pr" ? "pr" : "issue";
+
+  // Category classification
   const categoryAns = rawAnswers.category as ChoiceAnswer | undefined;
-  const domainAns = rawAnswers.technical_domain as ChoiceAnswer | undefined;
-
-  const itemType: ItemTypeDecision =
-    itemTypeAns?.choice === "pr" || itemTypeAns?.choice === "issue" ? itemTypeAns.choice : item.type;
-
   const category: CategoryDecision = (categoryAns?.choice as CategoryDecision) || "other";
-  const technicalDomain: TechnicalDomainDecision = (domainAns?.choice as TechnicalDomainDecision) || "other";
+
+  // P2-4: REPOSITORY GENERALITY
+  // Technical domain resolution with generic fallback to "other"
+  const domainAns = rawAnswers.technical_domain as ChoiceAnswer | undefined;
+  const domainDef = questions.technical_domain;
+  const validDomainCriteria = domainDef && domainDef.type === "choice" ? domainDef.criteria : GENERIC_TECHNICAL_DOMAINS;
+  const rawDomainChoice = domainAns?.choice;
+  const technicalDomain: TechnicalDomainDecision =
+    rawDomainChoice && rawDomainChoice in validDomainCriteria ? rawDomainChoice : "other";
 
   // Helper to normalize score against defined rubric level bounds: levels 0..N-1 maps to 0..1
   const normalizeRubricScore = (ans: ScoreAnswer | undefined, questionKey: string): number => {
@@ -195,23 +242,52 @@ export async function evaluateItemDecisions(
   const severityNorm = normalizeRubricScore(severityAns, "technical_severity");
 
   const evidenceQuality = Math.round((reproScoreNorm * 0.7 + docScoreNorm * 0.3) * 100) / 100;
-  const securityRisk = securityAns?.noul ?? 0.0;
-  const breakingChangeRisk = breakingAns?.noul ?? 0.0;
-  const investigationNeeded = investigationAns?.noul ?? 0.0;
+
+  // P1-2: MISSING RISK ASSESSMENTS
+  // Represent unevaluated or missing assessments explicitly as null.
+  // Never default absent risk assessments to probability zero.
+  const securityRisk: number | null =
+    securityAns && typeof securityAns.noul === "number" && Number.isFinite(securityAns.noul) ? securityAns.noul : null;
+
+  const breakingChangeRisk: number | null =
+    breakingAns && typeof breakingAns.noul === "number" && Number.isFinite(breakingAns.noul) ? breakingAns.noul : null;
+
+  const investigationNeeded: number | null =
+    investigationAns && typeof investigationAns.noul === "number" && Number.isFinite(investigationAns.noul)
+      ? investigationAns.noul
+      : null;
 
   // Advisory route resolution — purely advisory, never closes
   const reasons: string[] = [];
   let advisoryRoute: AdvisoryRoutingDecision = "maintainer_triage";
 
-  if (securityRisk >= 0.6) {
+  const hasValidSecurity = securityRisk !== null && securityRisk >= 0 && securityRisk <= 1;
+  const hasValidBreaking = breakingChangeRisk !== null && breakingChangeRisk >= 0 && breakingChangeRisk <= 1;
+  const hasValidInvestigation = investigationNeeded !== null && investigationNeeded >= 0 && investigationNeeded <= 1;
+
+  if (!hasValidSecurity) {
+    // Unknown or malformed security-critical assessment: safe escalation behavior
+    advisoryRoute = "security_escalation";
+    reasons.push("Security risk assessment is unevaluated, missing, or malformed; escalated for safety review");
+  } else if (securityRisk >= 0.6) {
     advisoryRoute = "security_escalation";
     reasons.push(`Security risk flag raised with probability ${securityRisk.toFixed(2)}`);
   } else if (evidenceQuality < 0.25 && itemType === "issue") {
     advisoryRoute = "needs_reproduction";
     reasons.push(`Low reproduction evidence (${evidenceQuality.toFixed(2)}) requires contributor clarification`);
-  } else if (investigationNeeded >= 0.7 || routingAns?.choice === "agent_investigate") {
+  } else if ((hasValidInvestigation && investigationNeeded >= 0.7) || routingAns?.choice === "agent_investigate") {
     advisoryRoute = "expert_investigation";
-    reasons.push(`Investigation probability ${investigationNeeded.toFixed(2)} indicates non-trivial analysis needed`);
+    const probStr = hasValidInvestigation ? `probability ${investigationNeeded.toFixed(2)}` : "agent recommendation";
+    reasons.push(`Investigation ${probStr} indicates non-trivial analysis needed`);
+  } else if (!hasValidBreaking || !hasValidInvestigation) {
+    // Incomplete mandatory risk assessments: require complete mandatory assessment fields before routine or doc-only routing
+    advisoryRoute = "maintainer_triage";
+    const missing: string[] = [];
+    if (!hasValidBreaking) missing.push("breaking change risk");
+    if (!hasValidInvestigation) missing.push("investigation needed");
+    reasons.push(
+      `Mandatory risk assessment incomplete (missing ${missing.join(", ")}); defaulting to maintainer triage`,
+    );
   } else if (category === "documentation") {
     advisoryRoute = "documentation_only";
     reasons.push("Categorized as documentation; suitable for direct maintainer or docs review");

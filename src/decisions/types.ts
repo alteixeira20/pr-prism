@@ -64,7 +64,7 @@ export type AnswerFor<Q extends DecisionQuestionDef> = Q extends ChoiceQuestionD
       : DecisionAnswer;
 
 export interface DecisionProvenance {
-  /** Provider identifier, e.g. "jev" or "mock". */
+  /** Provider identifier, e.g. "jev", "mock", or "disabled". */
   provider: string;
   /** Actual model version that answered, e.g. "jev-1.14.0". */
   model: string;
@@ -72,6 +72,10 @@ export interface DecisionProvenance {
   inputHash: string;
   /** Version of the decision schema/catalog used. */
   decisionSchemaVersion: string;
+  /** Cryptographic SHA-256 hash of question definitions, instructions, criteria, and schema version. */
+  rubricHash: string;
+  /** Composite decision identity hash combining inputHash, rubricHash, model, and schemaVersion. */
+  decisionIdentity: string;
   /** Token usage statistics if reported by provider. */
   usage?: {
     inputTokens: number | null;
@@ -136,15 +140,25 @@ export type CategoryDecision =
   | "question"
   | "other";
 
-export type TechnicalDomainDecision =
-  | "core_engine"
-  | "api_server"
-  | "cli_ux"
-  | "vector_storage"
-  | "git_integration"
-  | "ci_build"
-  | "docs"
+/**
+ * Universal repository technical domain taxonomy.
+ * Provides a generic default applicable to arbitrary software repositories.
+ */
+export type GenericTechnicalDomain =
+  | "core_logic"
+  | "api_service"
+  | "ui_ux"
+  | "data_storage"
+  | "integrations"
+  | "ci_infra"
+  | "documentation"
   | "other";
+
+/**
+ * Technical domain classification. Allows generic domains as well as
+ * configurable domain identifiers defined per repository.
+ */
+export type TechnicalDomainDecision = GenericTechnicalDomain | (string & {});
 
 export type AdvisoryRoutingDecision =
   | "maintainer_triage"
@@ -178,8 +192,8 @@ export interface TriageDecisionReport {
     productRelevance?: number;
     evidenceQuality: number;
     technicalSeverity: number;
-    securityRisk: number;
-    breakingChangeRisk: number;
+    securityRisk: number | null;
+    breakingChangeRisk: number | null;
   };
   advisoryRoute: AdvisoryRoutingDecision;
   reasons: string[];

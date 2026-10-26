@@ -1,5 +1,5 @@
 import { ProviderError } from "../errors.js";
-import { computeStateHash } from "./sanitize.js";
+import { computeDecisionIdentity, computeRubricHash, computeStateHash } from "./sanitize.js";
 import type {
   ChoiceAnswer,
   ChoiceQuestionDef,
@@ -17,6 +17,8 @@ import type {
 export interface MockProviderOptions {
   model?: string;
   presetAnswers?: Record<string, DecisionAnswer>;
+  /** When true, only answers explicitly present in presetAnswers are returned without auto-generating fallbacks. */
+  exactPresetAnswers?: boolean;
   simulateError?: "unauthorized" | "rate_limit" | "timeout" | "connection" | "invalid_response";
   latencyMs?: number;
 }
@@ -64,11 +66,25 @@ export class MockDecisionProvider implements DecisionProvider {
     }
 
     const inputHash = computeStateHash(state);
+    const schemaVersion = request.schemaVersion || "1.0.0";
+    const rubricHash = computeRubricHash(request.questions, schemaVersion);
+    const model = request.model || this.defaultModel;
+    const decisionIdentity = computeDecisionIdentity({
+      inputHash,
+      rubricHash,
+      model,
+      schemaVersion,
+    });
+
     const answers: Record<string, DecisionAnswer> = {};
 
     for (const [name, q] of Object.entries(request.questions)) {
       if (this.options.presetAnswers?.[name]) {
         answers[name] = this.options.presetAnswers[name];
+        continue;
+      }
+
+      if (this.options.exactPresetAnswers) {
         continue;
       }
 
@@ -122,9 +138,11 @@ export class MockDecisionProvider implements DecisionProvider {
       answers: answers as any,
       provenance: {
         provider: "mock",
-        model: request.model || this.defaultModel,
+        model,
         inputHash,
-        decisionSchemaVersion: request.schemaVersion || "1.0.0",
+        decisionSchemaVersion: schemaVersion,
+        rubricHash,
+        decisionIdentity,
         usage: {
           inputTokens: 150,
           outputTokens: 25,

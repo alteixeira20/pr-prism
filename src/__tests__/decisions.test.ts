@@ -1,16 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadConfig, loadEnvConfig } from "../config.js";
 import {
+  computeDecisionIdentity,
+  computeRubricHash,
   computeStateHash,
   createDecisionProvider,
   DEFAULT_JEV_MODEL,
+  DEFAULT_MAX_BODY,
+  DEFAULT_MAX_TITLE,
+  DisabledDecisionProvider,
   evaluateItemDecisions,
+  GENERIC_TECHNICAL_DOMAINS,
   JevDecisionProvider,
   MockDecisionProvider,
+  PR_PRISM_TECHNICAL_DOMAINS,
   sanitizeItemForDecision,
   sanitizeUntrustedText,
   TRIAGE_QUESTIONS,
   TRIAGE_SCHEMA_VERSION,
+  validateDecisionAnswer,
 } from "../decisions/index.js";
 import { ProviderError } from "../errors.js";
 import type { PRItem } from "../types.js";
@@ -20,6 +28,8 @@ describe("Typed Decision Layer (Phase 1)", () => {
     it("exports version 1.0.0 schema and standard triage questions", () => {
       expect(TRIAGE_SCHEMA_VERSION).toBe("1.0.0");
       expect(DEFAULT_JEV_MODEL).toBe("jev-1.14.0");
+      expect(DEFAULT_MAX_TITLE).toBe(500);
+      expect(DEFAULT_MAX_BODY).toBe(16000);
       expect(TRIAGE_QUESTIONS.category).toBeDefined();
       expect(TRIAGE_QUESTIONS.technical_domain).toBeDefined();
       expect(TRIAGE_QUESTIONS.reproduction_evidence).toBeDefined();
@@ -27,7 +37,25 @@ describe("Typed Decision Layer (Phase 1)", () => {
       // Verifies that item type is not queried via inference (relies on trusted metadata)
       expect(TRIAGE_QUESTIONS.item_type).toBeUndefined();
     });
+
+    it("uses universal generic technical domain taxonomy by default (P2-4)", () => {
+      const criteria = (TRIAGE_QUESTIONS.technical_domain as any).criteria;
+      expect(criteria).toEqual(GENERIC_TECHNICAL_DOMAINS);
+      expect(criteria.core_logic).toBeDefined();
+      expect(criteria.api_service).toBeDefined();
+      expect(criteria.ui_ux).toBeDefined();
+      expect(criteria.data_storage).toBeDefined();
+      expect(criteria.integrations).toBeDefined();
+      expect(criteria.ci_infra).toBeDefined();
+      expect(criteria.documentation).toBeDefined();
+      expect(criteria.other).toBeDefined();
+
+      // Ensure pr-prism specific domains are NOT in the generic default
+      expect(criteria.core_engine).toBeUndefined();
+      expect(criteria.vector_storage).toBeUndefined();
+    });
   });
+
   describe("Untrusted Input Sanitization & State Hashing", () => {
     it("strips ANSI escape sequences and non-printable control characters", () => {
       const malicious = "\x1B[31mRed Alert\x1B[0m\x00\x07Text with normal \t and \n whitespace \x1F\x7F";
@@ -44,11 +72,35 @@ describe("Typed Decision Layer (Phase 1)", () => {
       expect(sanitized).toContain("[REDACTED_SECRET]");
     });
 
-    it("bounds excessive input length with truncation marker", () => {
+    it("bounds excessive input length with truncation marker (P2-5)", () => {
       const longText = "a".repeat(20000);
       const bounded = sanitizeUntrustedText(longText, 500);
       expect(bounded.length).toBeLessThan(600);
       expect(bounded).toContain("[...truncated for decision context]");
+    });
+
+    it("enforces explicit sanitization bounds for all fields (P2-5)", () => {
+      const longItem: PRItem = {
+        number: 1,
+        type: "pr",
+        repo: "r".repeat(500),
+        title: "t".repeat(1000),
+        body: "b".repeat(30000),
+        author: "a".repeat(300),
+        state: "s".repeat(200),
+        labels: ["l".repeat(300)],
+        createdAt: "2026-10-26T00:00:00Z",
+        updatedAt: "2026-10-26T00:00:00Z",
+      };
+
+      const state = sanitizeItemForDecision(longItem);
+      expect(state.repo.length).toBeLessThanOrEqual(250);
+      expect(state.title.length).toBeLessThanOrEqual(550);
+      expect(state.body.length).toBeLessThanOrEqual(16050);
+      expect(state.body).toContain("[...truncated for decision context]");
+      expect(state.author.length).toBeLessThanOrEqual(150);
+      expect(state.state.length).toBeLessThanOrEqual(100);
+      expect(state.labels[0].length).toBeLessThanOrEqual(150);
     });
 
     it("treats prompt injection attempts as passive data in structured state", () => {
@@ -81,6 +133,214 @@ describe("Typed Decision Layer (Phase 1)", () => {
 
       expect(hash1).toBe(hash2);
       expect(hash1).toHaveLength(64);
+    });
+  });
+
+  describe("P2-3: Decision Provenance & Rubric Hashing", () => {
+    it("computes stable deterministic rubric hash", () => {
+      const hash1 = computeRubricHash(TRIAGE_QUESTIONS, "1.0.0");
+      const hash2 = computeRubricHash(TRIAGE_QUESTIONS, "1.0.0");
+      expect(hash1).toBe(hash2);
+      expect(hash1).toHaveLength(64);
+    });
+
+    it("invalidates decision identity when question instructions change", () => {
+      const modifiedQuestions = {
+        ...TRIAGE_QUESTIONS,
+        category: {
+          ...TRIAGE_QUESTIONS.category,
+          instructions: "Modified instructions for category triage?",
+        },
+      };
+
+      const baseHash = computeRubricHash(TRIAGE_QUESTIONS, "1.0.0");
+      const modifiedHash = computeRubricHash(modifiedQuestions, "1.0.0");
+      expect(baseHash).not.toBe(modifiedHash);
+
+      const id1 = computeDecisionIdentity({
+        inputHash: "a".repeat(64),
+        rubricHash: baseHash,
+        model: "jev-1.14.0",
+      });
+      const id2 = computeDecisionIdentity({
+        inputHash: "a".repeat(64),
+        rubricHash: modifiedHash,
+        model: "jev-1.14.0",
+      });
+      expect(id1).not.toBe(id2);
+    });
+
+    it("invalidates decision identity when rubric criteria change", () => {
+      const modifiedQuestions = {
+        ...TRIAGE_QUESTIONS,
+        category: {
+          type: "choice" as const,
+          instructions: (TRIAGE_QUESTIONS.category as any).instructions,
+          criteria: {
+            ...(TRIAGE_QUESTIONS.category as any).criteria,
+            new_custom_category: "A new category description",
+          },
+        },
+      };
+
+      const baseHash = computeRubricHash(TRIAGE_QUESTIONS, "1.0.0");
+      const modifiedHash = computeRubricHash(modifiedQuestions, "1.0.0");
+      expect(baseHash).not.toBe(modifiedHash);
+    });
+
+    it("invalidates decision identity when schemaVersion changes", () => {
+      const hashV1 = computeRubricHash(TRIAGE_QUESTIONS, "1.0.0");
+      const hashV2 = computeRubricHash(TRIAGE_QUESTIONS, "2.0.0");
+      expect(hashV1).not.toBe(hashV2);
+
+      const id1 = computeDecisionIdentity({
+        inputHash: "a".repeat(64),
+        rubricHash: hashV1,
+        model: "jev-1.14.0",
+        schemaVersion: "1.0.0",
+      });
+      const id2 = computeDecisionIdentity({
+        inputHash: "a".repeat(64),
+        rubricHash: hashV2,
+        model: "jev-1.14.0",
+        schemaVersion: "2.0.0",
+      });
+      expect(id1).not.toBe(id2);
+    });
+  });
+
+  describe("P1-3: Strict Response Validation", () => {
+    it("validates correct choice answer", () => {
+      const validated = validateDecisionAnswer(
+        "cat",
+        { type: "choice", instructions: "Category?", criteria: { bug: "Bug", feat: "Feature" } },
+        { type: "choice", choice: "bug", confidence: 0.9, probabilities: { bug: 0.9, feat: 0.1 } },
+      );
+      expect(validated.type).toBe("choice");
+      expect((validated as any).choice).toBe("bug");
+    });
+
+    it("rejects choice answer with choice not in permitted criteria", () => {
+      expect(() =>
+        validateDecisionAnswer(
+          "cat",
+          { type: "choice", instructions: "Category?", criteria: { bug: "Bug", feat: "Feature" } },
+          { type: "choice", choice: "unpermitted_option", confidence: 0.9 },
+        ),
+      ).toThrow(ProviderError);
+    });
+
+    it("rejects choice answer with non-finite or out-of-bounds confidence", () => {
+      const q = { type: "choice" as const, instructions: "q?", criteria: { a: null } };
+      expect(() => validateDecisionAnswer("q", q, { type: "choice", choice: "a", confidence: 1.5 })).toThrow(
+        /Confidence must be a finite number within \[0, 1\]/,
+      );
+      expect(() => validateDecisionAnswer("q", q, { type: "choice", choice: "a", confidence: -0.1 })).toThrow(
+        /Confidence must be a finite number within \[0, 1\]/,
+      );
+      expect(() => validateDecisionAnswer("q", q, { type: "choice", choice: "a", confidence: Number.NaN })).toThrow(
+        /Confidence must be a finite number within \[0, 1\]/,
+      );
+    });
+
+    it("rejects invalid probability values and distributions", () => {
+      const q = { type: "choice" as const, instructions: "q?", criteria: { a: null, b: null } };
+      // Probability value < 0
+      expect(() =>
+        validateDecisionAnswer("q", q, {
+          type: "choice",
+          choice: "a",
+          confidence: 0.9,
+          probabilities: { a: -0.1, b: 1.1 },
+        }),
+      ).toThrow(/Probability must be a finite number within \[0, 1\]/);
+
+      // Probability key not in criteria
+      expect(() =>
+        validateDecisionAnswer("q", q, {
+          type: "choice",
+          choice: "a",
+          confidence: 0.9,
+          probabilities: { a: 0.5, unknown_key: 0.5 },
+        }),
+      ).toThrow(/not in criteria/);
+
+      // Distribution sum outside [0.95, 1.05]
+      expect(() =>
+        validateDecisionAnswer("q", q, {
+          type: "choice",
+          choice: "a",
+          confidence: 0.9,
+          probabilities: { a: 0.2, b: 0.2 }, // sum = 0.4
+        }),
+      ).toThrow(/Sum of probabilities must equal 1\.0/);
+    });
+
+    it("validates correct score answer within rubric bounds", () => {
+      const validated = validateDecisionAnswer(
+        "sev",
+        { type: "score", instructions: "Severity?", criteria: ["Low", "Med", "High"] },
+        { type: "score", score: 1.5, confidence: 0.85, probabilities: { "0": 0.1, "1": 0.6, "2": 0.3 } },
+      );
+      expect(validated.type).toBe("score");
+      expect((validated as any).score).toBe(1.5);
+    });
+
+    it("rejects score answer outside rubric bounds [0, criteria.length - 1]", () => {
+      const q = { type: "score" as const, instructions: "q?", criteria: ["Low", "High"] }; // maxScore = 1
+      expect(() => validateDecisionAnswer("q", q, { type: "score", score: 2.5, confidence: 0.9 })).toThrow(
+        /Score must be a finite number within rubric bounds \[0, 1\]/,
+      );
+      expect(() => validateDecisionAnswer("q", q, { type: "score", score: -0.5, confidence: 0.9 })).toThrow(
+        /Score must be a finite number within rubric bounds \[0, 1\]/,
+      );
+      expect(() => validateDecisionAnswer("q", q, { type: "score", score: Number.NaN, confidence: 0.9 })).toThrow(
+        /Score must be a finite number within rubric bounds/,
+      );
+    });
+
+    it("validates correct noul answer strictly within [0, 1]", () => {
+      const validated = validateDecisionAnswer(
+        "sec",
+        { type: "noul", instructions: "Security?" },
+        { type: "noul", noul: 0.72 },
+      );
+      expect(validated.type).toBe("noul");
+      expect((validated as any).noul).toBe(0.72);
+    });
+
+    it("rejects noul answer strictly outside [0, 1] without silent clamping", () => {
+      const q = { type: "noul" as const, instructions: "Security?" };
+      // Must NOT silently clamp 1.25 to 1.0! Must reject!
+      expect(() => validateDecisionAnswer("sec", q, { type: "noul", noul: 1.25 })).toThrow(
+        /Expected finite probability strictly within \[0, 1\]/,
+      );
+      // Must NOT silently clamp -0.1 to 0.0! Must reject!
+      expect(() => validateDecisionAnswer("sec", q, { type: "noul", noul: -0.1 })).toThrow(
+        /Expected finite probability strictly within \[0, 1\]/,
+      );
+      expect(() => validateDecisionAnswer("sec", q, { type: "noul", noul: Number.NaN })).toThrow(
+        /Expected finite probability strictly within \[0, 1\]/,
+      );
+      expect(() => validateDecisionAnswer("sec", q, { type: "noul", noul: Number.POSITIVE_INFINITY })).toThrow(
+        /Expected finite probability strictly within \[0, 1\]/,
+      );
+    });
+
+    it("rejects mismatched answer primitive type", () => {
+      expect(() =>
+        validateDecisionAnswer(
+          "sec",
+          { type: "noul", instructions: "Security?" },
+          { type: "choice", choice: "yes", confidence: 0.9 },
+        ),
+      ).toThrow(/Mismatched answer type/);
+    });
+
+    it("rejects missing answer with ProviderError", () => {
+      expect(() => validateDecisionAnswer("sec", { type: "noul", instructions: "Security?" }, undefined)).toThrow(
+        /Missing answer for question "sec"/,
+      );
     });
   });
 
@@ -174,14 +434,43 @@ describe("Typed Decision Layer (Phase 1)", () => {
       expect(result.answers.is_urgent.type).toBe("noul");
       expect(result.answers.is_urgent.noul).toBe(0.85);
 
-      // Provenance
+      // Provenance includes rubricHash and decisionIdentity (P2-3)
       expect(result.provenance.provider).toBe("jev");
       expect(result.provenance.model).toBe("jev-1.14.0");
       expect(result.provenance.inputHash).toHaveLength(64);
+      expect(result.provenance.rubricHash).toHaveLength(64);
+      expect(result.provenance.decisionIdentity).toHaveLength(64);
       expect(result.provenance.decisionSchemaVersion).toBe("1.0.0");
       expect(result.provenance.usage?.inputTokens).toBe(250);
       expect(result.provenance.usage?.outputTokens).toBe(35);
       expect(typeof result.provenance.latencyMs).toBe("number");
+    });
+
+    it("rejects invalid out-of-bounds model responses in JevDecisionProvider (P1-3)", async () => {
+      const mockFetch = vi.fn().mockImplementation(async () => {
+        const body = {
+          model: "jev-1.14.0",
+          answers: {
+            is_urgent: {
+              type: "noul",
+              noul: 1.5, // Invalid probability > 1
+            },
+          },
+        };
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      });
+
+      const provider = new JevDecisionProvider({
+        apiKey: "typesafe_test_key_123456",
+        fetch: mockFetch,
+      });
+
+      await expect(
+        provider.evaluate({
+          state: "content",
+          questions: { is_urgent: { type: "noul", instructions: "urgent?" } },
+        }),
+      ).rejects.toThrow(/Expected finite probability strictly within \[0, 1\]/);
     });
 
     it("maps 401 AuthenticationError to ProviderError", async () => {
@@ -298,6 +587,8 @@ describe("Typed Decision Layer (Phase 1)", () => {
       });
 
       expect(result.provenance.provider).toBe("mock");
+      expect(result.provenance.rubricHash).toHaveLength(64);
+      expect(result.provenance.decisionIdentity).toHaveLength(64);
       expect(result.answers.cat.choice).toBe("perf");
       expect(result.answers.evidence.score).toBe(1);
       expect(result.answers.is_sec.noul).toBe(0.1);
@@ -355,9 +646,9 @@ describe("Typed Decision Layer (Phase 1)", () => {
         category: { type: "choice", choice: "bug", confidence: 0.95, probabilities: { bug: 0.95 } },
         technical_domain: {
           type: "choice",
-          choice: "core_engine",
+          choice: "core_logic",
           confidence: 0.9,
-          probabilities: { core_engine: 0.9 },
+          probabilities: { core_logic: 0.9 },
         },
         reproduction_evidence: {
           type: "score",
@@ -396,7 +687,7 @@ describe("Typed Decision Layer (Phase 1)", () => {
       expect(report.item.number).toBe(101);
       expect(report.classification.itemType).toBe("pr");
       expect(report.classification.category).toBe("bug");
-      expect(report.classification.technicalDomain).toBe("core_engine");
+      expect(report.classification.technicalDomain).toBe("core_logic");
 
       // Verify orthogonal dimensions:
       expect(report.dimensions.prQuality).toBe(0.88);
@@ -411,10 +702,75 @@ describe("Typed Decision Layer (Phase 1)", () => {
       expect(report.reasons.length).toBeGreaterThan(0);
     });
 
+    it("enforces GitHub item.type as authoritative over model answers (P1-1)", async () => {
+      const mock = new MockDecisionProvider();
+      mock.setPresetAnswers({
+        // Model attempts to override PRItem.type = "pr" with item_type = "issue"
+        item_type: { type: "choice", choice: "issue", confidence: 0.99, probabilities: { issue: 0.99 } },
+        category: { type: "choice", choice: "bug", confidence: 0.9, probabilities: { bug: 0.9 } },
+        has_security_risk: { type: "noul", noul: 0.01 },
+        has_breaking_change: { type: "noul", noul: 0.01 },
+        investigation_needed: { type: "noul", noul: 0.01 },
+      });
+
+      const report = await evaluateItemDecisions(testItem, mock);
+      // Must strictly remain "pr" because item.type is "pr"
+      expect(report.item.type).toBe("pr");
+      expect(report.classification.itemType).toBe("pr");
+
+      // Conversely, on an issue, item.type is "issue" regardless of model
+      const issueItem: PRItem = { ...testItem, type: "issue" };
+      mock.setPresetAnswers({
+        item_type: { type: "choice", choice: "pr", confidence: 0.99, probabilities: { pr: 0.99 } },
+        has_security_risk: { type: "noul", noul: 0.01 },
+        has_breaking_change: { type: "noul", noul: 0.01 },
+        investigation_needed: { type: "noul", noul: 0.01 },
+      });
+      const issueReport = await evaluateItemDecisions(issueItem, mock);
+      expect(issueReport.item.type).toBe("issue");
+      expect(issueReport.classification.itemType).toBe("issue");
+    });
+
+    it("explicitly represents missing risk assessments as null and escalates for safety (P1-2)", async () => {
+      const mock = new MockDecisionProvider({ exactPresetAnswers: true });
+      // Omit has_security_risk, has_breaking_change, and investigation_needed
+      mock.setPresetAnswers({
+        category: { type: "choice", choice: "documentation", confidence: 0.9, probabilities: { documentation: 0.9 } },
+      });
+
+      const report = await evaluateItemDecisions(testItem, mock);
+
+      // Must be null, NOT probability 0.0
+      expect(report.dimensions.securityRisk).toBeNull();
+      expect(report.dimensions.breakingChangeRisk).toBeNull();
+
+      // Missing security risk assessment MUST escalate for safety review
+      expect(report.advisoryRoute).toBe("security_escalation");
+      expect(report.reasons[0]).toContain("Security risk assessment is unevaluated, missing, or malformed");
+    });
+
+    it("requires complete mandatory assessments before producing routine or doc-only routing (P1-2)", async () => {
+      const mock = new MockDecisionProvider({ exactPresetAnswers: true });
+      // Security is evaluated low, but breaking change and investigation are missing
+      mock.setPresetAnswers({
+        category: { type: "choice", choice: "documentation", confidence: 0.95, probabilities: { documentation: 0.95 } },
+        has_security_risk: { type: "noul", noul: 0.02 },
+        // has_breaking_change and investigation_needed are omitted!
+      });
+
+      const report = await evaluateItemDecisions(testItem, mock);
+
+      // Even though category is "documentation", missing breaking change prevents documentation_only routing
+      expect(report.advisoryRoute).toBe("maintainer_triage");
+      expect(report.reasons.some((r) => r.includes("Mandatory risk assessment incomplete"))).toBe(true);
+    });
+
     it("routes high security risk items to security_escalation", async () => {
       const mock = new MockDecisionProvider();
       mock.setPresetAnswers({
         has_security_risk: { type: "noul", noul: 0.85 },
+        has_breaking_change: { type: "noul", noul: 0.01 },
+        investigation_needed: { type: "noul", noul: 0.01 },
       });
 
       const report = await evaluateItemDecisions(testItem, mock);
@@ -436,6 +792,8 @@ describe("Typed Decision Layer (Phase 1)", () => {
         reproduction_evidence: { type: "score", score: 0.1, confidence: 0.9, probabilities: { "0": 0.9 } },
         documentation_completeness: { type: "score", score: 0.2, confidence: 0.9, probabilities: { "0": 0.9 } },
         has_security_risk: { type: "noul", noul: 0.01 },
+        has_breaking_change: { type: "noul", noul: 0.01 },
+        investigation_needed: { type: "noul", noul: 0.01 },
       });
 
       const report = await evaluateItemDecisions(issueItem, mock);
@@ -447,14 +805,58 @@ describe("Typed Decision Layer (Phase 1)", () => {
       mock.setPresetAnswers({
         investigation_needed: { type: "noul", noul: 0.85 },
         has_security_risk: { type: "noul", noul: 0.05 },
+        has_breaking_change: { type: "noul", noul: 0.01 },
       });
 
       const report = await evaluateItemDecisions(testItem, mock);
       expect(report.advisoryRoute).toBe("expert_investigation");
     });
 
+    it("supports configurable domain taxonomy and generic fallback to other (P2-4)", async () => {
+      const mock = new MockDecisionProvider();
+
+      // Test custom domain configuration
+      mock.setPresetAnswers({
+        technical_domain: {
+          type: "choice",
+          choice: "core_engine",
+          confidence: 0.9,
+          probabilities: { core_engine: 0.9 },
+        },
+        has_security_risk: { type: "noul", noul: 0.01 },
+        has_breaking_change: { type: "noul", noul: 0.01 },
+        investigation_needed: { type: "noul", noul: 0.01 },
+      });
+
+      const customReport = await evaluateItemDecisions(testItem, mock, {
+        technicalDomainCriteria: PR_PRISM_TECHNICAL_DOMAINS,
+      });
+      expect(customReport.classification.technicalDomain).toBe("core_engine");
+
+      // Test unrecognized domain falls back cleanly to "other"
+      mock.setPresetAnswers({
+        technical_domain: {
+          type: "choice",
+          choice: "non_existent_domain",
+          confidence: 0.9,
+          probabilities: { non_existent_domain: 0.9 },
+        },
+        has_security_risk: { type: "noul", noul: 0.01 },
+        has_breaking_change: { type: "noul", noul: 0.01 },
+        investigation_needed: { type: "noul", noul: 0.01 },
+      });
+
+      const fallbackReport = await evaluateItemDecisions(testItem, mock);
+      expect(fallbackReport.classification.technicalDomain).toBe("other");
+    });
+
     it("never makes automated GitHub mutations or closures", async () => {
       const mock = new MockDecisionProvider();
+      mock.setPresetAnswers({
+        has_security_risk: { type: "noul", noul: 0.01 },
+        has_breaking_change: { type: "noul", noul: 0.01 },
+        investigation_needed: { type: "noul", noul: 0.01 },
+      });
       const report = await evaluateItemDecisions(testItem, mock);
 
       // Verify the report is purely data/advisory
@@ -465,9 +867,52 @@ describe("Typed Decision Layer (Phase 1)", () => {
     });
   });
 
-  describe("Configuration & Factory Integration", () => {
-    it("creates JevDecisionProvider when requested with valid key", () => {
+  describe("Configuration & Provider Activation Contract (P2-2)", () => {
+    let originalEnv: string | undefined;
+
+    beforeEach(() => {
+      originalEnv = process.env.TYPESAFE_API_KEY;
+    });
+
+    afterEach(() => {
+      if (originalEnv !== undefined) {
+        process.env.TYPESAFE_API_KEY = originalEnv;
+      } else {
+        delete process.env.TYPESAFE_API_KEY;
+      }
+    });
+
+    it("returns DisabledDecisionProvider when config.enabled is false", async () => {
+      process.env.TYPESAFE_API_KEY = "typesafe_test_key_123456";
       const provider = createDecisionProvider({
+        enabled: false,
+        provider: "jev",
+      });
+
+      expect(provider).toBeInstanceOf(DisabledDecisionProvider);
+      expect(provider.id).toBe("disabled");
+
+      await expect(
+        provider.evaluate({
+          state: "content",
+          questions: { q: { type: "noul", instructions: "q?" } },
+        }),
+      ).rejects.toThrow(ProviderError);
+    });
+
+    it("TYPESAFE_API_KEY being present does not activate Jev when disabled", () => {
+      process.env.TYPESAFE_API_KEY = "typesafe_active_key_test";
+      const config = loadConfig();
+      // prism.config.yaml has decisions.enabled: false by default
+      expect(config.decisions.enabled).toBe(false);
+
+      const provider = createDecisionProvider(config.decisions);
+      expect(provider.id).toBe("disabled");
+    });
+
+    it("creates JevDecisionProvider when explicitly enabled with valid key", () => {
+      const provider = createDecisionProvider({
+        enabled: true,
         provider: "jev",
         apiKey: "typesafe_key",
         model: "jev-1.14.0",
@@ -480,28 +925,51 @@ describe("Typed Decision Layer (Phase 1)", () => {
       const provider = createDecisionProvider({ provider: "mock" });
       expect(provider.id).toBe("mock");
     });
+  });
 
-    it("defaults decisions.enabled to false in PrismConfig", () => {
-      const config = loadConfig();
-      expect(config.decisions.enabled).toBe(false);
-      expect(config.decisions.provider).toBe("jev");
-      expect(config.decisions.model).toBe(DEFAULT_JEV_MODEL);
+  describe("P2-1: Environment Boolean Parsing", () => {
+    let originalEnvVal: string | undefined;
+    let originalToken: string | undefined;
+
+    beforeEach(() => {
+      originalEnvVal = process.env.DECISION_ENABLED;
+      originalToken = process.env.GITHUB_TOKEN;
+      process.env.GITHUB_TOKEN = "ghp_mock_token_for_env_test_123456";
     });
 
-    it("defaults DECISION_ENABLED to false in EnvConfig", () => {
-      const originalToken = process.env.GITHUB_TOKEN;
-      process.env.GITHUB_TOKEN = "ghp_mock_token_for_env_test_123456";
-      try {
+    afterEach(() => {
+      if (originalEnvVal !== undefined) {
+        process.env.DECISION_ENABLED = originalEnvVal;
+      } else {
+        delete process.env.DECISION_ENABLED;
+      }
+      if (originalToken !== undefined) {
+        process.env.GITHUB_TOKEN = originalToken;
+      } else {
+        delete process.env.GITHUB_TOKEN;
+      }
+    });
+
+    it("accepts valid boolean string and numeric representations", () => {
+      // true variants
+      for (const val of ["true", "TRUE", "True", "1"]) {
+        process.env.DECISION_ENABLED = val;
+        const env = loadEnvConfig();
+        expect(env.DECISION_ENABLED).toBe(true);
+      }
+
+      // false variants
+      for (const val of ["false", "FALSE", "False", "0", ""]) {
+        process.env.DECISION_ENABLED = val;
         const env = loadEnvConfig();
         expect(env.DECISION_ENABLED).toBe(false);
-        expect(env.DECISION_PROVIDER).toBe("jev");
-        expect(env.DECISION_MODEL).toBe(DEFAULT_JEV_MODEL);
-      } finally {
-        if (originalToken !== undefined) {
-          process.env.GITHUB_TOKEN = originalToken;
-        } else {
-          delete process.env.GITHUB_TOKEN;
-        }
+      }
+    });
+
+    it("rejects invalid boolean strings with clear validation error", () => {
+      for (const invalid of ["yes", "no", "banana", "2", "-1", "enabled", "disabled"]) {
+        process.env.DECISION_ENABLED = invalid;
+        expect(() => loadEnvConfig()).toThrow(/DECISION_ENABLED must be a boolean/);
       }
     });
   });

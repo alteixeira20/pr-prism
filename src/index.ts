@@ -25,6 +25,7 @@ export type {
   DecisionRequestOptions,
   DecisionResult,
   EvaluateItemOptions,
+  GenericTechnicalDomain,
   ItemTypeDecision,
   JevProviderConfig,
   MockProviderOptions,
@@ -38,15 +39,24 @@ export type {
 } from "./decisions/index.js";
 // Typed Decision Layer (Phase 1)
 export {
+  computeDecisionIdentity,
+  computeRubricHash,
   createDecisionProvider,
   DEFAULT_JEV_MODEL,
+  DEFAULT_MAX_BODY,
+  DEFAULT_MAX_TITLE,
+  DisabledDecisionProvider,
   evaluateItemDecisions,
+  GENERIC_TECHNICAL_DOMAINS,
   JevDecisionProvider,
   MockDecisionProvider,
+  PR_PRISM_TECHNICAL_DOMAINS,
   sanitizeItemForDecision,
   sanitizeUntrustedText,
   TRIAGE_QUESTIONS,
   TRIAGE_SCHEMA_VERSION,
+  validateDecisionAnswer,
+  validateDecisionAnswers,
 } from "./decisions/index.js";
 export { createEmbeddingProvider, prepareEmbeddingText } from "./embeddings.js";
 export { classifyFetchError, classifyHttpError, ProviderError } from "./errors.js";

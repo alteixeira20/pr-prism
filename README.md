@@ -156,15 +156,22 @@ pr-prism includes an optional, model-agnostic **Typed Decision Layer** powered b
 
 ### key principles
 
-- **disabled by default**: pr-prism starts with zero network calls to paid inference APIs. Existing scans, duplicate clustering, ranking, and reviews are completely unchanged.
+- **disabled by default**: pr-prism starts with zero network calls to paid inference APIs. Existing scans, duplicate clustering, ranking, and reviews are completely unchanged. The presence of `TYPESAFE_API_KEY` does **not** activate Jev; typed decisions remain disabled unless `decisions.enabled: true` in `prism.config.yaml` or `DECISION_ENABLED=true` in `.env` is explicitly configured. Normal startup makes zero TypeSafe requests.
 - **four orthogonal dimensions**:
   1. *PR Quality*: deterministic signals from `scorer.ts` (CI status, test coverage, diff size).
   2. *Product Relevance*: semantic alignment from `vision.ts` (`VISION.md` embedding similarity).
   3. *Evidence Quality*: rubric scores assessing reproduction steps and description completeness.
   4. *Technical Severity & Risk*: rubric scores and calibrated risk nouls (security risk, breaking change).
-- **strictly advisory**: model probabilities never authorize PR closure, approval, or rejection. Low reproduction evidence routes to `needs_reproduction` or `maintainer_triage`, never automated closure.
-- **trusted metadata first**: deterministic fields already established by GitHub (such as `pr` vs `issue` type and bot status) are consumed directly from trusted metadata rather than querying the model.
-- **untrusted input defense**: contributor titles and bodies are stripped of ANSI sequences and control characters, bounded in size, redacted for credentials, and fingerprinted via SHA-256 for audit trails. This bounds payloads and mitigates terminal hazards without claiming complete semantic prompt-injection immunity.
+- **strictly advisory**: model probabilities never authorize PR closure, approval, or rejection. Low reproduction evidence routes to `needs_reproduction` or `maintainer_triage`, never automated closure. Missing or unevaluated risk assessments are explicitly represented as `null` rather than assumed zero, and unknown security risks trigger safe escalation.
+- **trusted metadata first**: deterministic fields already established by GitHub (such as `pr` vs `issue` type and bot status) are authoritative and consumed directly from GitHub metadata; model responses can never override `PRItem.type`.
+- **untrusted input defense & bounded limits**: contributor text is strictly sanitized and length-bounded before model evaluation:
+  - Titles: bounded to 500 characters in decision context (display tables cap at 256 characters).
+  - Bodies: bounded to 16,000 characters (~4k tokens) with clean `[...truncated for decision context]` marker.
+  - Metadata: repo (200 chars), author (100 chars), state (50 chars), labels (100 chars each).
+  - Secrets: credentials and API keys matching common patterns are redacted to `[REDACTED_SECRET]`.
+  - ANSI escapes and non-printable control characters are stripped; Unicode normalized (NFC).
+  - Provenance: SHA-256 fingerprinting of input state, question rubrics, and model versions ensures tamper-evident audit trails.
+- **repository generality**: uses a universal generic domain taxonomy (`core_logic`, `api_service`, `ui_ux`, `data_storage`, `integrations`, `ci_infra`, `documentation`, `other`) suitable for arbitrary GitHub repositories, with configurable domain taxonomy overrides.
 
 ### configuration
 
@@ -206,10 +213,10 @@ const report = await evaluateItemDecisions(
   provider,
 );
 
-console.log(report.classification); // { category: "bug", technicalDomain: "vector_storage" }
+console.log(report.classification); // { category: "bug", technicalDomain: "data_storage" }
 console.log(report.item.type);      // "issue" (resolved from trusted metadata)
 console.log(report.advisoryRoute);  // "maintainer_triage"
-console.log(report.provenance);     // { provider: "mock", model: "mock-jev-1.14.0", inputHash: "..." }
+console.log(report.provenance);     // { provider: "mock", model: "mock-jev-1.14.0", inputHash: "...", rubricHash: "...", decisionIdentity: "..." }
 ```
 
 OpenAI-compatible embedding and chat endpoints use the existing generic `openai` provider. Featherless.ai is one tested
@@ -299,12 +306,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - uses: StressTestor/pr-prism@main
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           embedding-provider: jina
           embedding-api-key: ${{ secrets.JINA_API_KEY }}
 ```
+
+> **Node.js runtime requirement**: pr-prism requires Node.js >= 22.0.0 (Node 22 or 24 LTS recommended). Workflows invoking the composite GitHub Action must include `actions/setup-node@v4` with `node-version: 22` to ensure a compatible runtime.
 
 on pull_request events, prism checks if the new PR is a duplicate and comments with matches. on schedule, it does a full triage scan.
 

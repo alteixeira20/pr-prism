@@ -5,15 +5,21 @@
  * - Strips ANSI terminal escape sequences and non-printable control characters
  * - Normalizes Unicode (NFC)
  * - Redacts credential patterns (Bearer tokens, GitHub PATs, common API keys)
- * - Enforces clean length bounds with truncation markers
+ * - Enforces clean length bounds with truncation markers:
+ *     - Contributor titles: bounded to 500 characters (maxTitleLength)
+ *     - Contributor bodies: bounded to 16,000 characters (maxBodyLength) with truncation marker
+ *     - Metadata fields: repo (200), author (100), state (50), labels (100 each)
  * - Wraps untrusted text in structured state objects
  * - Computes deterministic SHA-256 state fingerprints for cache identity & audit provenance
+ * - Computes stable SHA-256 rubric hashes over questions, instructions, criteria, and schema versions
+ * - Derives composite decision identity combining input, rubric, and model
  *
  * Note: String sanitization mitigates terminal hazards, row injections, and token blow-ups,
  * but does not claim complete semantic immunity against adversarial prompt manipulation.
  */
 import { createHash } from "node:crypto";
 import type { PRItem } from "../types.js";
+import type { DecisionQuestions } from "./types.js";
 
 // Strip ANSI escape sequences: CSI, OSC, etc.
 const ANSI_PATTERN = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
@@ -30,13 +36,16 @@ const SENSITIVE_PATTERNS = [
 ];
 
 export interface SanitizeOptions {
+  /** Maximum length for contributor titles in decision context. Defaults to 500. */
   maxTitleLength?: number;
+  /** Maximum length for contributor bodies in decision context. Defaults to 16,000. */
   maxBodyLength?: number;
+  /** Whether to redact secrets and credentials. Defaults to true. */
   redactSecrets?: boolean;
 }
 
-const DEFAULT_MAX_TITLE = 500;
-const DEFAULT_MAX_BODY = 16000;
+export const DEFAULT_MAX_TITLE = 500;
+export const DEFAULT_MAX_BODY = 16000;
 
 /**
  * Clean untrusted strings by stripping ANSI codes, control characters,
@@ -114,6 +123,47 @@ export function sanitizeItemForDecision(item: PRItem, opts: SanitizeOptions = {}
 export function computeStateHash(state: Record<string, unknown> | string): string {
   const normalized = typeof state === "string" ? state : JSON.stringify(sortKeys(state));
   return createHash("sha256").update(normalized).digest("hex");
+}
+
+/**
+ * Computes a deterministic SHA-256 hash of question definitions, instructions,
+ * criteria, and schema version. Rubric changes produce a different hash,
+ * invalidating decision identity.
+ */
+export function computeRubricHash(questions: DecisionQuestions, schemaVersion = "1.0.0"): string {
+  const normalized: Record<string, unknown> = {
+    schemaVersion,
+    questions: {},
+  };
+  const sortedNames = Object.keys(questions).sort();
+  for (const name of sortedNames) {
+    const q = questions[name];
+    (normalized.questions as Record<string, unknown>)[name] = {
+      type: q.type,
+      instructions: q.instructions.trim(),
+      criteria: q.criteria,
+    };
+  }
+  return createHash("sha256")
+    .update(JSON.stringify(sortKeys(normalized)))
+    .digest("hex");
+}
+
+export interface DecisionIdentityParams {
+  inputHash: string;
+  rubricHash: string;
+  model: string;
+  schemaVersion?: string;
+}
+
+/**
+ * Computes a composite decision identity hash combining inputHash, rubricHash,
+ * model identifier, and schemaVersion.
+ */
+export function computeDecisionIdentity(params: DecisionIdentityParams): string {
+  const version = params.schemaVersion || "1.0.0";
+  const composite = `${params.inputHash}:${params.rubricHash}:${params.model}:${version}`;
+  return createHash("sha256").update(composite).digest("hex");
 }
 
 function sortKeys(value: unknown): unknown {

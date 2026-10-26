@@ -163,7 +163,27 @@ const EnvSchema = z.object({
       }
     }),
   TYPESAFE_API_KEY: z.string().optional(),
-  DECISION_ENABLED: z.coerce.boolean().default(false),
+  DECISION_ENABLED: z
+    .union([z.boolean(), z.string(), z.number()])
+    .optional()
+    .transform((val, ctx) => {
+      if (val === undefined || val === "") return false;
+      if (typeof val === "boolean") return val;
+      if (typeof val === "number") {
+        if (val === 1) return true;
+        if (val === 0) return false;
+      }
+      if (typeof val === "string") {
+        const trimmed = val.trim().toLowerCase();
+        if (trimmed === "true" || trimmed === "1") return true;
+        if (trimmed === "false" || trimmed === "0") return false;
+      }
+      ctx.addIssue({
+        code: "custom",
+        message: "DECISION_ENABLED must be a boolean (accepted values: true, false, 1, 0)",
+      });
+      return z.NEVER;
+    }),
   DECISION_PROVIDER: z.enum(["jev", "mock"]).default("jev"),
   DECISION_MODEL: z.string().default("jev-1.14.0"),
 });
