@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const rootDir = resolve(__dirname, "../..");
@@ -150,9 +151,53 @@ describe("CLI Characterization - Validation & Mutex Rules", () => {
     expect(res.stderr).toContain("Unknown output format: html. Supported: markdown");
   });
 
-  it("handles reset gracefully when database does not exist", () => {
-    const res = runCli(["reset", "-y"]);
-    expect(res.exitCode).toBe(0);
-    expect(res.stdout).toContain("No database found");
+  it("handles reset gracefully in isolated temp dir when database does not exist", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "prism-reset-absent-"));
+    try {
+      const res = runCli(["reset", "-y"], { cwd: tempDir });
+      expect(res.exitCode).toBe(0);
+      expect(res.stdout).toContain(`No database found at ${join(tempDir, "data", "prism.db")}`);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("deletes disposable database fixture in isolated temp dir while preserving sentinel files", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "prism-reset-fixture-"));
+    try {
+      const dataDir = join(tempDir, "data");
+      mkdirSync(dataDir, { recursive: true });
+
+      const dbPath = join(dataDir, "prism.db");
+      const walPath = join(dataDir, "prism.db-wal");
+      const shmPath = join(dataDir, "prism.db-shm");
+      const sentinelInside = join(dataDir, "sentinel.txt");
+      const sentinelOutside = join(tempDir, "important-user-file.txt");
+
+      writeFileSync(dbPath, "SQLite format 3\0fixture");
+      writeFileSync(walPath, "wal-fixture");
+      writeFileSync(shmPath, "shm-fixture");
+      writeFileSync(sentinelInside, "keep-me-safe");
+      writeFileSync(sentinelOutside, "do-not-delete");
+
+      expect(existsSync(dbPath)).toBe(true);
+      expect(existsSync(walPath)).toBe(true);
+      expect(existsSync(shmPath)).toBe(true);
+
+      const res = runCli(["reset", "-y"], { cwd: tempDir });
+      expect(res.exitCode).toBe(0);
+      expect(res.stdout).toContain("Database deleted. Run `prism scan` to rebuild.");
+
+      // DB and WAL/SHM deleted
+      expect(existsSync(dbPath)).toBe(false);
+      expect(existsSync(walPath)).toBe(false);
+      expect(existsSync(shmPath)).toBe(false);
+
+      // Unrelated sentinel files remain completely untouched
+      expect(existsSync(sentinelInside)).toBe(true);
+      expect(existsSync(sentinelOutside)).toBe(true);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });

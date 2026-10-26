@@ -20,7 +20,13 @@ export interface GenerateMarkdownReportOptions {
 }
 
 /**
- * Builds the Markdown representation of the PR-Prism triage report.
+ * Read-only Markdown report renderer with storage dependencies.
+ * Formats cluster statistics, overview metrics, canonical source selections,
+ * and ranking tables into a GitHub Flavored Markdown document.
+ *
+ * NOTE: When `verbose` is true, this renderer queries `opts.store.getEmbedding()`
+ * to compute pairwise cosine similarities against each cluster's canonical source
+ * of truth. It does not perform any database mutations or network requests.
  */
 export function generateMarkdownReport(opts: GenerateMarkdownReportOptions): string {
   const { repoFull, date, stats, clusters, ranked, visionResults, topN, clusterN, verbose, store } = opts;

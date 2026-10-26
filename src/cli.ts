@@ -1,19 +1,26 @@
 #!/usr/bin/env node
-import { basename } from "node:path";
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createProgram } from "./cli/program.js";
 
 const program = createProgram();
 
-function isDirectRun(): boolean {
-  if (!process.argv[1]) return false;
-  const arg1 = process.argv[1];
-  return (
-    arg1.endsWith("cli.js") ||
-    arg1.endsWith("cli.ts") ||
-    arg1.endsWith("/prism") ||
-    arg1 === "prism" ||
-    basename(arg1) === "prism"
-  );
+/**
+ * Determines whether the current module is the entry point executed directly by Node.
+ * Compares the canonicalized real paths of process.argv[1] and import.meta.url,
+ * accounting for symlinks and preventing false-positive execution when imported
+ * by unrelated scripts (e.g., scripts named cli.js, cli.ts, or prism).
+ */
+export function isDirectRun(argv1: string | undefined = process.argv[1], metaUrl: string = import.meta.url): boolean {
+  if (!argv1 || !metaUrl) return false;
+  try {
+    const argPath = realpathSync(resolve(argv1));
+    const selfPath = realpathSync(fileURLToPath(metaUrl));
+    return argPath === selfPath;
+  } catch {
+    return false;
+  }
 }
 
 if (isDirectRun()) {
