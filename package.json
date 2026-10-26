@@ -34,7 +34,7 @@
     "prepublishOnly": "npm run build && npm run test"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "files": [
     "dist/",
