@@ -34,6 +34,13 @@ const LabelsSchema = z.object({
   top_pick: z.string().default("prism:top-pick"),
 });
 
+const DecisionConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  provider: z.enum(["jev", "mock"]).default("jev"),
+  model: z.string().default("jev-1.14.0"),
+  timeout_ms: z.number().default(10000),
+});
+
 /** Clustering behaviour that is not a similarity threshold. */
 const ClusterSchema = z.object({
   /**
@@ -108,6 +115,7 @@ const ConfigSchema = z.object({
     .optional()
     .transform((v) => v ?? { weights: ScoringWeightsSchema.parse({}) }),
   labels: LabelsSchema.optional().transform((v) => LabelsSchema.parse(v ?? {})),
+  decisions: DecisionConfigSchema.optional().transform((v) => DecisionConfigSchema.parse(v ?? {})),
   cluster: ClusterSchema.optional().transform((v) => ClusterSchema.parse(v ?? {})),
   batch_size: z.number().default(50),
   max_prs: z.number().default(5000),
@@ -154,6 +162,10 @@ const EnvSchema = z.object({
         return z.NEVER;
       }
     }),
+  TYPESAFE_API_KEY: z.string().optional(),
+  DECISION_ENABLED: z.coerce.boolean().default(false),
+  DECISION_PROVIDER: z.enum(["jev", "mock"]).default("jev"),
+  DECISION_MODEL: z.string().default("jev-1.14.0"),
 });
 
 export type EnvConfig = z.infer<typeof EnvSchema>;

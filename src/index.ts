@@ -10,6 +10,44 @@ export {
   confidenceTier,
 } from "./confidence.js";
 export { getRepos, getVisionDoc, loadConfig, loadEnvConfig, parseRepo } from "./config.js";
+export type {
+  AdvisoryRoutingDecision,
+  CategoryDecision,
+  ChoiceAnswer,
+  ChoiceQuestionDef,
+  DecisionAnswer,
+  DecisionConfig,
+  DecisionProvenance,
+  DecisionProvider,
+  DecisionQuestionDef,
+  DecisionQuestions,
+  DecisionRequest,
+  DecisionRequestOptions,
+  DecisionResult,
+  EvaluateItemOptions,
+  ItemTypeDecision,
+  JevProviderConfig,
+  MockProviderOptions,
+  NoulAnswer,
+  NoulQuestionDef,
+  SanitizeOptions,
+  ScoreAnswer,
+  ScoreQuestionDef,
+  TechnicalDomainDecision,
+  TriageDecisionReport,
+} from "./decisions/index.js";
+// Typed Decision Layer (Phase 1)
+export {
+  createDecisionProvider,
+  DEFAULT_JEV_MODEL,
+  evaluateItemDecisions,
+  JevDecisionProvider,
+  MockDecisionProvider,
+  sanitizeItemForDecision,
+  sanitizeUntrustedText,
+  TRIAGE_QUESTIONS,
+  TRIAGE_SCHEMA_VERSION,
+} from "./decisions/index.js";
 export { createEmbeddingProvider, prepareEmbeddingText } from "./embeddings.js";
 export { classifyFetchError, classifyHttpError, ProviderError } from "./errors.js";
 export { GitHubClient } from "./github.js";

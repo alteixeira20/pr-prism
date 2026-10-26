@@ -147,6 +147,70 @@ cross-repo dupe display: `[owner/repo1] #1234 <-> [owner/repo2] #567`
 | LLM | anthropic | paid | |
 | LLM | kimi | free tier | |
 | LLM | ollama | free | local |
+| decision | jev (TypeSafe AI) | paid (opt-in) | System One model (`jev-1.14.0`) for typed decisions, disabled by default |
+| decision | mock | free | deterministic offline testing provider |
+
+## typed decisions (phase 1)
+
+pr-prism includes an optional, model-agnostic **Typed Decision Layer** powered by TypeSafe AI's Jev (`jev-1.14.0`). It computes structured categorical selections and calibrated probabilities (`Choice`, `Score`, `Noul`) to help classify items and recommend advisory triage paths.
+
+### key principles
+
+- **disabled by default**: pr-prism starts with zero network calls to paid inference APIs. Existing scans, duplicate clustering, ranking, and reviews are completely unchanged.
+- **four orthogonal dimensions**:
+  1. *PR Quality*: deterministic signals from `scorer.ts` (CI status, test coverage, diff size).
+  2. *Product Relevance*: semantic alignment from `vision.ts` (`VISION.md` embedding similarity).
+  3. *Evidence Quality*: rubric scores assessing reproduction steps and description completeness.
+  4. *Technical Severity & Risk*: rubric scores and calibrated risk nouls (security risk, breaking change).
+- **strictly advisory**: model probabilities never authorize PR closure, approval, or rejection. Low reproduction evidence routes to `needs_reproduction` or `maintainer_triage`, never automated closure.
+- **trusted metadata first**: deterministic fields already established by GitHub (such as `pr` vs `issue` type and bot status) are consumed directly from trusted metadata rather than querying the model.
+- **untrusted input defense**: contributor titles and bodies are stripped of ANSI sequences and control characters, bounded in size, redacted for credentials, and fingerprinted via SHA-256 for audit trails. This bounds payloads and mitigates terminal hazards without claiming complete semantic prompt-injection immunity.
+
+### configuration
+
+In `prism.config.yaml`:
+```yaml
+decisions:
+  enabled: true
+  provider: jev
+  model: jev-1.14.0
+  timeout_ms: 10000
+```
+
+In `.env`:
+```bash
+TYPESAFE_API_KEY=your_typesafe_api_key_here
+```
+
+### programmatic usage (with mock inference)
+
+```typescript
+import { createDecisionProvider, evaluateItemDecisions } from "prism-triage";
+
+// Deterministic offline evaluation without network calls
+const provider = createDecisionProvider({ provider: "mock" });
+
+const report = await evaluateItemDecisions(
+  {
+    number: 42,
+    type: "issue",
+    repo: "owner/repo",
+    title: "App crashes when vector store table is missing",
+    body: "Steps to reproduce: 1. Delete data/prism.db 2. Run prism stats",
+    author: "contributor",
+    createdAt: "2026-10-26T00:00:00Z",
+    updatedAt: "2026-10-26T00:00:00Z",
+    labels: ["bug"],
+    state: "open",
+  },
+  provider,
+);
+
+console.log(report.classification); // { category: "bug", technicalDomain: "vector_storage" }
+console.log(report.item.type);      // "issue" (resolved from trusted metadata)
+console.log(report.advisoryRoute);  // "maintainer_triage"
+console.log(report.provenance);     // { provider: "mock", model: "mock-jev-1.14.0", inputHash: "..." }
+```
 
 OpenAI-compatible embedding and chat endpoints use the existing generic `openai` provider. Featherless.ai is one tested
 compatible endpoint; it does not require a dedicated provider name or vendor-specific environment variables.
