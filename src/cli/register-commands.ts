@@ -4,6 +4,7 @@ import { registerCompareCommand } from "./commands/compare.js";
 import { registerDoctorCommand } from "./commands/doctor.js";
 import { registerDupesCommand } from "./commands/dupes.js";
 import { registerInitCommand } from "./commands/init.js";
+import { registerMaintainerCommand } from "./commands/maintainer.js";
 import { registerRankCommand } from "./commands/rank.js";
 import { registerReEmbedCommand } from "./commands/re-embed.js";
 import { registerReportCommand } from "./commands/report.js";
@@ -32,6 +33,7 @@ export function registerCommands(program: Command): Command {
   registerReEmbedCommand(program);
   registerStatsCommand(program);
   registerReportCommand(program);
+  registerMaintainerCommand(program);
 
   return program;
 }
