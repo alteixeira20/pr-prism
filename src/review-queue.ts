@@ -898,6 +898,63 @@ export class DurableReviewQueue {
   }
 
   /**
+   * Retrieves the latest valid review checkpoint for a repo and item number.
+   * Excludes checkpoints marked 'invalid'.
+   */
+  public getLatestValidCheckpoint(repo: string, itemNumber: number): ReviewCheckpointRecord | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM review_checkpoints
+         WHERE repo = ? AND item_number = ? AND (checkpoint_status IS NULL OR checkpoint_status != 'invalid')
+         ORDER BY completed_at DESC LIMIT 1`,
+      )
+      .get(repo, itemNumber);
+
+    return (row as ReviewCheckpointRecord) || null;
+  }
+
+  /**
+   * Synchronizes valid review checkpoints into a VectorStore reviews table.
+   * Returns the count of reviews synced.
+   */
+  public syncCheckpointsToStore(store: { saveReview: (review: any) => void }, repo?: string): number {
+    const query = repo
+      ? "SELECT * FROM review_checkpoints WHERE repo = ? AND (checkpoint_status IS NULL OR checkpoint_status != 'invalid')"
+      : "SELECT * FROM review_checkpoints WHERE (checkpoint_status IS NULL OR checkpoint_status != 'invalid')";
+    const rows = (repo ? this.db.prepare(query).all(repo) : this.db.prepare(query).all()) as ReviewCheckpointRecord[];
+
+    let count = 0;
+    for (const row of rows) {
+      try {
+        const parsed = JSON.parse(row.result_json);
+        const findings = Array.isArray(parsed.findings)
+          ? parsed.findings.map((f: any) => (typeof f === "string" ? f : f.message || JSON.stringify(f)))
+          : Array.isArray(parsed.concerns)
+            ? parsed.concerns
+            : [];
+
+        store.saveReview({
+          number: row.item_number,
+          repo: row.repo,
+          type: row.item_type,
+          provider: row.provider,
+          model: row.model,
+          summary: parsed.summary || "",
+          concerns: findings,
+          recommendation:
+            parsed.recommendation || (parsed.issueAction === "close_duplicate" ? "close" : "needs_human_review"),
+          confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0.8,
+          reviewedAt: row.completed_at,
+        });
+        count++;
+      } catch {
+        // ignore parse errors
+      }
+    }
+    return count;
+  }
+
+  /**
    * Retrieve a job by ID.
    */
   public getJob(jobId: string): ReviewJobRecord | null {

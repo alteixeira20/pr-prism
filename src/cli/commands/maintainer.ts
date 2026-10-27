@@ -1,5 +1,4 @@
 import { existsSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
 import chalk from "chalk";
 import type { Command } from "commander";
 import ora from "ora";
@@ -19,6 +18,7 @@ import { generateBacklogJson, generateBacklogReport } from "../../maintainer/rep
 import type { MaintainerItem, WorklistFilter, WorklistSort } from "../../maintainer/types.js";
 import { buildWorklist, type WorklistResult } from "../../maintainer/worklist.js";
 import { createPipelineContext } from "../../pipeline.js";
+import { DurableReviewQueue } from "../../review-queue.js";
 import type { PRItem } from "../../types.js";
 import {
   type DuplicateClusterData,
@@ -35,7 +35,7 @@ import {
   type PrepareDraftData,
   type ShowItemData,
 } from "../formatting/maintainer.js";
-import { getDatabasePath, getDataDir } from "../shared/paths.js";
+import { getDatabasePath, getDecisionsDatabasePath, getQueueDatabasePath } from "../shared/paths.js";
 
 /**
  * Registers the `prism maintainer` subcommand group onto Commander.
@@ -59,19 +59,31 @@ export function registerMaintainerCommand(program: Command): void {
     .option("--page <n>", "Page number (1-based)", "1")
     .option("--limit <n>", "Items per page", "25")
     .option("--format <format>", "Output format: terminal|markdown|json", "terminal")
+    .option("--decisions-db <path>", "Path to Jev decisions SQLite database")
+    .option("--queue-db <path>", "Path to durable review queue SQLite database")
+    .option("--db <path>", "Path to primary prism SQLite database")
     .action(async (opts) => {
-      const dbPath = getDatabasePath();
+      const dbPath = getDatabasePath(opts.db);
       if (!existsSync(dbPath)) {
         console.log(chalk.yellow("Database not initialized. Run 'prism init' or 'prism scan' first."));
         return;
       }
 
-      const ctx = await createPipelineContext(opts.repo);
-      const decisionsDbPath = resolve(getDataDir(), "decisions.db");
+      const ctx = await createPipelineContext(opts.repo, { dbPath });
+      const decisionsDbPath = getDecisionsDatabasePath(opts.decisionsDb);
+      const queueDbPath = getQueueDatabasePath(opts.queueDb);
       let jevStore: JevDecisionStore | undefined;
       if (existsSync(decisionsDbPath)) {
         try {
           jevStore = new JevDecisionStore(decisionsDbPath);
+        } catch {
+          // ignore
+        }
+      }
+      let queue: DurableReviewQueue | undefined;
+      if (existsSync(queueDbPath)) {
+        try {
+          queue = new DurableReviewQueue(queueDbPath);
         } catch {
           // ignore
         }
@@ -116,6 +128,7 @@ export function registerMaintainerCommand(program: Command): void {
             repo: ctx.repoFull,
             clusters,
             jevStore,
+            queue,
             filter,
             sort,
             page: { offset, limit: limitNum },
@@ -153,6 +166,7 @@ export function registerMaintainerCommand(program: Command): void {
         }
       } finally {
         jevStore?.close();
+        queue?.close();
         ctx.store.close();
       }
     });
@@ -164,6 +178,9 @@ export function registerMaintainerCommand(program: Command): void {
     .option("--type <pr|issue>", "Item type: pr or issue", "pr")
     .option("-r, --repo <owner/repo>", "Repository")
     .option("--format <format>", "Output format: terminal|markdown|json", "terminal")
+    .option("--decisions-db <path>", "Path to Jev decisions SQLite database")
+    .option("--queue-db <path>", "Path to durable review queue SQLite database")
+    .option("--db <path>", "Path to primary prism SQLite database")
     .action(async (numberArg: string, opts) => {
       const num = parseInt(numberArg, 10);
       if (Number.isNaN(num)) {
@@ -171,18 +188,27 @@ export function registerMaintainerCommand(program: Command): void {
         return;
       }
 
-      const dbPath = getDatabasePath();
+      const dbPath = getDatabasePath(opts.db);
       if (!existsSync(dbPath)) {
         console.log(chalk.yellow("Database not initialized. Run 'prism init' or 'prism scan' first."));
         return;
       }
 
-      const ctx = await createPipelineContext(opts.repo);
-      const decisionsDbPath = resolve(getDataDir(), "decisions.db");
+      const ctx = await createPipelineContext(opts.repo, { dbPath });
+      const decisionsDbPath = getDecisionsDatabasePath(opts.decisionsDb);
+      const queueDbPath = getQueueDatabasePath(opts.queueDb);
       let jevStore: JevDecisionStore | undefined;
       if (existsSync(decisionsDbPath)) {
         try {
           jevStore = new JevDecisionStore(decisionsDbPath);
+        } catch {
+          // ignore
+        }
+      }
+      let queue: DurableReviewQueue | undefined;
+      if (existsSync(queueDbPath)) {
+        try {
+          queue = new DurableReviewQueue(queueDbPath);
         } catch {
           // ignore
         }
@@ -205,7 +231,34 @@ export function registerMaintainerCommand(program: Command): void {
         }
 
         const decision = jevStore?.getDecision(ctx.repoFull, (item.type as "pr" | "issue") || "pr", num);
-        const rawReview = ctx.store.getReview(ctx.repoFull, num);
+        let rawReview = ctx.store.getReview(ctx.repoFull, num);
+        if (!rawReview && queue) {
+          const checkpoint = queue.getLatestValidCheckpoint(ctx.repoFull, num);
+          if (checkpoint?.result_json) {
+            try {
+              const parsed = JSON.parse(checkpoint.result_json);
+              rawReview = {
+                number: num,
+                repo: ctx.repoFull,
+                type: item.type || "pr",
+                provider: checkpoint.provider,
+                model: checkpoint.model,
+                summary: parsed.summary || "",
+                concerns: Array.isArray(parsed.findings)
+                  ? parsed.findings.map((f: any) => (typeof f === "string" ? f : f.message || JSON.stringify(f)))
+                  : Array.isArray(parsed.concerns)
+                    ? parsed.concerns
+                    : [],
+                recommendation:
+                  parsed.recommendation || (parsed.issueAction === "close_duplicate" ? "close" : "needs_human_review"),
+                confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0.8,
+                reviewedAt: checkpoint.completed_at,
+              };
+            } catch {
+              // ignore
+            }
+          }
+        }
 
         let maintainerItem: MaintainerItem | undefined;
         try {
@@ -220,6 +273,7 @@ export function registerMaintainerCommand(program: Command): void {
             repo: ctx.repoFull,
             clusters,
             jevStore,
+            queue,
           });
           maintainerItem = wl.items.find((i) => i.number === num && i.type === item.type);
         } catch {
@@ -342,6 +396,7 @@ export function registerMaintainerCommand(program: Command): void {
         }
       } finally {
         jevStore?.close();
+        queue?.close();
         ctx.store.close();
       }
     });
@@ -354,14 +409,15 @@ export function registerMaintainerCommand(program: Command): void {
     .option("-t, --threshold <number>", "Similarity threshold (default: 0.85)", "0.85")
     .option("--confirmed-only", "Only identity duplicates (identical head-oid or patch-id)")
     .option("--format <format>", "Output format: terminal|markdown|json", "terminal")
+    .option("--db <path>", "Path to primary prism SQLite database")
     .action(async (opts) => {
-      const dbPath = getDatabasePath();
+      const dbPath = getDatabasePath(opts.db);
       if (!existsSync(dbPath)) {
         console.log(chalk.yellow("Database not initialized. Run 'prism init' or 'prism scan' first."));
         return;
       }
 
-      const ctx = await createPipelineContext(opts.repo);
+      const ctx = await createPipelineContext(opts.repo, { dbPath });
       try {
         const allItems = ctx.store.getAllItems(ctx.repoFull) as unknown as PRItem[];
         if (allItems.length === 0) {
@@ -456,6 +512,7 @@ export function registerMaintainerCommand(program: Command): void {
     )
     .option("--dry-run", "Show what would be prepared without writing to GitHub (always default)", true)
     .option("--format <format>", "Output format: terminal|markdown", "terminal")
+    .option("--db <path>", "Path to primary prism SQLite database")
     .action(async (numberArg: string, opts) => {
       const num = parseInt(numberArg, 10);
       if (Number.isNaN(num)) {
@@ -463,13 +520,13 @@ export function registerMaintainerCommand(program: Command): void {
         return;
       }
 
-      const dbPath = getDatabasePath();
+      const dbPath = getDatabasePath(opts.db);
       if (!existsSync(dbPath)) {
         console.log(chalk.yellow("Database not initialized. Run 'prism init' or 'prism scan' first."));
         return;
       }
 
-      const ctx = await createPipelineContext(opts.repo);
+      const ctx = await createPipelineContext(opts.repo, { dbPath });
       try {
         const allItems = ctx.store.getAllItems(ctx.repoFull) as unknown as PRItem[];
         if (allItems.length === 0) {
@@ -584,19 +641,31 @@ export function registerMaintainerCommand(program: Command): void {
     .option("-o, --output <path>", "Save report to file", "maintainer-report.md")
     .option("--format <format>", "Output format: markdown|json", "markdown")
     .option("-n, --top <n>", "Top N items to include", "20")
+    .option("--decisions-db <path>", "Path to Jev decisions SQLite database")
+    .option("--queue-db <path>", "Path to durable review queue SQLite database")
+    .option("--db <path>", "Path to primary prism SQLite database")
     .action(async (opts) => {
-      const dbPath = getDatabasePath();
+      const dbPath = getDatabasePath(opts.db);
       if (!existsSync(dbPath)) {
         console.log(chalk.yellow("Database not initialized. Run 'prism init' or 'prism scan' first."));
         return;
       }
 
-      const ctx = await createPipelineContext(opts.repo);
-      const decisionsDbPath = resolve(getDataDir(), "decisions.db");
+      const ctx = await createPipelineContext(opts.repo, { dbPath });
+      const decisionsDbPath = getDecisionsDatabasePath(opts.decisionsDb);
+      const queueDbPath = getQueueDatabasePath(opts.queueDb);
       let jevStore: JevDecisionStore | undefined;
       if (existsSync(decisionsDbPath)) {
         try {
           jevStore = new JevDecisionStore(decisionsDbPath);
+        } catch {
+          // ignore
+        }
+      }
+      let queue: DurableReviewQueue | undefined;
+      if (existsSync(queueDbPath)) {
+        try {
+          queue = new DurableReviewQueue(queueDbPath);
         } catch {
           // ignore
         }
@@ -624,6 +693,7 @@ export function registerMaintainerCommand(program: Command): void {
             repo: ctx.repoFull,
             clusters,
             jevStore,
+            queue,
           });
         } catch {
           spinner.fail("Failed to build worklist");
@@ -648,6 +718,7 @@ export function registerMaintainerCommand(program: Command): void {
         }
       } finally {
         jevStore?.close();
+        queue?.close();
         ctx.store.close();
       }
     });

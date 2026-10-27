@@ -5,6 +5,7 @@
  * computing review freshness against the PR's latest update timestamp.
  */
 
+import type { DurableReviewQueue } from "../../review-queue.js";
 import type { VectorStore } from "../../store.js";
 
 /**
@@ -24,45 +25,91 @@ export interface MaintainerReviewResult {
 }
 
 /**
- * Retrieves the review result for a pull request from the VectorStore.
+ * Retrieves the review result for a pull request from the VectorStore,
+ * falling back to DurableReviewQueue checkpoints if provided.
  *
  * @param store The VectorStore instance
  * @param repo Full repository name (e.g. "owner/repo")
  * @param number Pull request number
+ * @param queue Optional DurableReviewQueue instance
  * @returns MaintainerReviewResult structure
  */
-export function getReviewResult(store: VectorStore, repo: string, number: number): MaintainerReviewResult {
+export function getReviewResult(
+  store: VectorStore,
+  repo: string,
+  number: number,
+  queue?: DurableReviewQueue,
+): MaintainerReviewResult {
   const review = store.getReview(repo, number);
-  if (!review) {
+  if (review) {
+    let recommendation: "merge" | "revise" | "close" | "needs_human_review" | null = null;
+    if (
+      review.recommendation === "merge" ||
+      review.recommendation === "revise" ||
+      review.recommendation === "close" ||
+      review.recommendation === "needs_human_review"
+    ) {
+      recommendation = review.recommendation;
+    } else if (review.recommendation) {
+      recommendation = "needs_human_review";
+    }
+
+    const findingsCount = Array.isArray(review.concerns) ? review.concerns.length : 0;
+
     return {
-      hasReview: false,
-      recommendation: null,
-      confidence: null,
-      summary: null,
-      findingsCount: 0,
+      hasReview: true,
+      recommendation,
+      confidence: typeof review.confidence === "number" ? review.confidence : null,
+      summary: review.summary || null,
+      findingsCount,
     };
   }
 
-  let recommendation: "merge" | "revise" | "close" | "needs_human_review" | null = null;
-  if (
-    review.recommendation === "merge" ||
-    review.recommendation === "revise" ||
-    review.recommendation === "close" ||
-    review.recommendation === "needs_human_review"
-  ) {
-    recommendation = review.recommendation;
-  } else if (review.recommendation) {
-    recommendation = "needs_human_review";
+  // Fallback to queue checkpoints if available
+  if (queue) {
+    try {
+      const checkpoint = queue.getLatestValidCheckpoint(repo, number);
+      if (checkpoint?.result_json) {
+        const parsed = JSON.parse(checkpoint.result_json);
+        let recommendation: "merge" | "revise" | "close" | "needs_human_review" | null = null;
+        if (
+          parsed.recommendation === "merge" ||
+          parsed.recommendation === "revise" ||
+          parsed.recommendation === "close" ||
+          parsed.recommendation === "needs_human_review"
+        ) {
+          recommendation = parsed.recommendation;
+        } else if (parsed.issueAction) {
+          recommendation = parsed.issueAction === "close_duplicate" ? "close" : "needs_human_review";
+        } else if (parsed.recommendation) {
+          recommendation = "needs_human_review";
+        }
+
+        const findings = Array.isArray(parsed.findings)
+          ? parsed.findings
+          : Array.isArray(parsed.concerns)
+            ? parsed.concerns
+            : [];
+
+        return {
+          hasReview: true,
+          recommendation,
+          confidence: typeof parsed.confidence === "number" ? parsed.confidence : null,
+          summary: parsed.summary || null,
+          findingsCount: findings.length,
+        };
+      }
+    } catch {
+      // ignore parse errors
+    }
   }
 
-  const findingsCount = Array.isArray(review.concerns) ? review.concerns.length : 0;
-
   return {
-    hasReview: true,
-    recommendation,
-    confidence: typeof review.confidence === "number" ? review.confidence : null,
-    summary: review.summary || null,
-    findingsCount,
+    hasReview: false,
+    recommendation: null,
+    confidence: null,
+    summary: null,
+    findingsCount: 0,
   };
 }
 

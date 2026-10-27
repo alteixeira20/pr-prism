@@ -1,10 +1,13 @@
 import type { Command } from "commander";
 import { registerBenchmarkCommand } from "./commands/benchmark.js";
 import { registerCompareCommand } from "./commands/compare.js";
+import { registerDecideCommand } from "./commands/decide.js";
 import { registerDoctorCommand } from "./commands/doctor.js";
 import { registerDupesCommand } from "./commands/dupes.js";
+import { registerHousekeepingCommand } from "./commands/housekeeping.js";
 import { registerInitCommand } from "./commands/init.js";
 import { registerMaintainerCommand } from "./commands/maintainer.js";
+import { registerPipelineCommand } from "./commands/pipeline.js";
 import { registerRankCommand } from "./commands/rank.js";
 import { registerReEmbedCommand } from "./commands/re-embed.js";
 import { registerReportCommand } from "./commands/report.js";
@@ -34,6 +37,9 @@ export function registerCommands(program: Command): Command {
   registerStatsCommand(program);
   registerReportCommand(program);
   registerMaintainerCommand(program);
+  registerHousekeepingCommand(program);
+  registerDecideCommand(program);
+  registerPipelineCommand(program);
 
   return program;
 }
