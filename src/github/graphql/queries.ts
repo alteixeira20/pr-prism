@@ -1,7 +1,7 @@
 export const PRS_QUERY = `
-  query($owner: String!, $repo: String!, $states: [PullRequestState!]!, $cursor: String) {
+  query($owner: String!, $repo: String!, $states: [PullRequestState!]!, $pageSize: Int = 100, $cursor: String) {
     repository(owner: $owner, name: $repo) {
-      pullRequests(first: 100, after: $cursor, states: $states, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pullRequests(first: $pageSize, after: $cursor, states: $states, orderBy: {field: UPDATED_AT, direction: DESC}) {
         totalCount
         pageInfo { hasNextPage endCursor }
         nodes {
@@ -36,9 +36,9 @@ export const PRS_QUERY = `
 `;
 
 export const ISSUES_QUERY = `
-  query($owner: String!, $repo: String!, $states: [IssueState!]!, $cursor: String) {
+  query($owner: String!, $repo: String!, $states: [IssueState!]!, $pageSize: Int = 100, $cursor: String) {
     repository(owner: $owner, name: $repo) {
-      issues(first: 100, after: $cursor, states: $states, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      issues(first: $pageSize, after: $cursor, states: $states, orderBy: {field: UPDATED_AT, direction: DESC}) {
         totalCount
         pageInfo { hasNextPage endCursor }
         nodes {
