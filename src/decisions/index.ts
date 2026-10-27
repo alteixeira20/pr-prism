@@ -1,4 +1,15 @@
+export { JevDecisionStore } from "./decision-store.js";
 export { DisabledDecisionProvider } from "./disabled-provider.js";
+export {
+  type BatchEvaluationResult,
+  type ComparisonSummaryMetrics,
+  compareJevAgainstQwen,
+  type EnrichedEvaluationItem,
+  loadOdysseusEvaluationInventory,
+  type QwenClassificationRow,
+  runJevEvaluationBatch,
+  selectStratifiedPilotSample,
+} from "./evaluation-study.js";
 export {
   DEFAULT_ROUTING_THRESHOLDS,
   type EvaluateItemOptions,
@@ -24,6 +35,28 @@ export {
   sanitizeItemForDecision,
   sanitizeUntrustedText,
 } from "./sanitize.js";
+export {
+  composeJevFirstDecisionRecord,
+  computeCredentialFingerprint,
+  DEFAULT_JEV_FIRST_THRESHOLDS,
+  type EvaluateJevFirstOptions,
+  estimateJevInferenceCostUsd,
+  evaluateDeterministicSafetyGates,
+  evaluateJevFirstItem,
+  JEV_FIRST_CATEGORIES,
+  JEV_FIRST_QUESTIONS,
+  JEV_FIRST_SCHEMA_VERSION,
+  JEV_INPUT_PRICE_PER_MTOK_USD,
+  type JevComplexityTier,
+  type JevDecomposedScores,
+  type JevFirstCategory,
+  type JevFirstDecisionRecord,
+  type JevFirstRoutingThresholds,
+  type JevPriorityTier,
+  prepareJevFirstState,
+  type ResolveTypeSafeKeyOptions,
+  resolveTypeSafeApiKey,
+} from "./triage-v2.js";
 export type {
   AdvisoryRoutingDecision,
   CategoryDecision,
