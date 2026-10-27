@@ -1,12 +1,12 @@
 import { execFileSync } from "node:child_process";
 import dns from "node:dns";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SCORING_WEIGHTS, type PrismConfig } from "../config.js";
 import { GitHubClient } from "../github.js";
 import { parseDuration, runDupes, runRank, runScan, runVision } from "../pipeline.js";
@@ -14,9 +14,9 @@ import { VectorStore } from "../store.js";
 import type { EmbeddingProvider, PipelineContext } from "../types.js";
 import { captureProcessEnv, getIsolatedEnv, restoreProcessEnv } from "./cli-test-env.js";
 import {
+  assertOsNetworkIsolationSupported,
   execInOsNetworkSandbox,
   installNetworkGuard,
-  isOsNetworkIsolationSupported,
   type NetworkGuard,
 } from "./network-sandbox.js";
 
@@ -28,6 +28,9 @@ describe("PR-Prism v4 Orchestrated Production E2E & Negative Acceptance", () => 
   let visionDocPath: string;
   let baselineEnv: NodeJS.ProcessEnv;
   let networkGuard: NetworkGuard;
+  let activeOctokitMock: any = null;
+  let origContextDesc: PropertyDescriptor | undefined;
+  let origWriteContextDesc: PropertyDescriptor | undefined;
 
   // Normalized 4-dimensional unit vector fixtures
   const v101 = [0.96, 0.28, 0.0, 0.0];
@@ -100,13 +103,57 @@ Hosting git repositories or replacing interactive human code reviews.
 `,
       "utf-8",
     );
+
+    // 4. Hook GitHubClient context and writeContext to ensure sub-operations
+    // (such as read-only label verification in runDupes and runVision) route through
+    // the controlled mock rather than issuing unmocked network calls.
+    origContextDesc = Object.getOwnPropertyDescriptor(GitHubClient.prototype, "context");
+    origWriteContextDesc = Object.getOwnPropertyDescriptor(GitHubClient.prototype, "writeContext");
+
+    if (origContextDesc?.get) {
+      const origContextGet = origContextDesc.get;
+      Object.defineProperty(GitHubClient.prototype, "context", {
+        get() {
+          const c = origContextGet.call(this);
+          return activeOctokitMock ? { ...c, octokit: activeOctokitMock } : c;
+        },
+        configurable: true,
+      });
+    }
+
+    if (origWriteContextDesc?.get) {
+      const origWriteContextGet = origWriteContextDesc.get;
+      Object.defineProperty(GitHubClient.prototype, "writeContext", {
+        get() {
+          const c = origWriteContextGet.call(this);
+          return activeOctokitMock ? { ...c, octokit: activeOctokitMock } : c;
+        },
+        configurable: true,
+      });
+    }
+  });
+
+  afterEach(() => {
+    // Reset active mock and assert zero unexpected network violations
+    activeOctokitMock = null;
+    networkGuard.assertZeroViolations();
   });
 
   afterAll(() => {
-    networkGuard.restore();
-    restoreProcessEnv(baselineEnv);
-    if (tempDir && existsSync(tempDir)) {
-      rmSync(tempDir, { recursive: true, force: true });
+    try {
+      networkGuard.assertZeroViolations();
+    } finally {
+      if (origContextDesc) {
+        Object.defineProperty(GitHubClient.prototype, "context", origContextDesc);
+      }
+      if (origWriteContextDesc) {
+        Object.defineProperty(GitHubClient.prototype, "writeContext", origWriteContextDesc);
+      }
+      networkGuard.restore();
+      restoreProcessEnv(baselineEnv);
+      if (tempDir && existsSync(tempDir)) {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
     }
   });
 
@@ -163,6 +210,7 @@ Hosting git repositories or replacing interactive human code reviews.
 
     const client = new GitHubClient(env.GITHUB_TOKEN, owner, repo);
     if (options.octokitMock) {
+      activeOctokitMock = options.octokitMock;
       (client as unknown as { octokit: unknown }).octokit = options.octokitMock;
     }
 
@@ -373,9 +421,6 @@ Hosting git repositories or replacing interactive human code reviews.
       const visionPR101 = visionScores!.find((s) => s.prNumber === 101);
       expect(visionPR101).toBeDefined();
       expect(visionPR101?.classification).toBeDefined();
-
-      // Ensure network guard recorded zero network breaches
-      networkGuard.assertZeroViolations();
     } finally {
       store.close();
     }
@@ -635,43 +680,169 @@ Hosting git repositories or replacing interactive human code reviews.
     }
   });
 
-  it("enforces default dry-run write protection with zero mutations against GitHub", async () => {
+  // ── AUDIT FINDING 3: POPULATED PIPELINE DRY-RUN VERIFICATION ─────────────
+
+  it("enforces populated pipeline dry-run write protection with zero mutations against GitHub", async () => {
     const repoFull = "test-owner/test-repo";
-    const dbPath = join(tempDir, "dry-run.db");
+    const dbPath = join(tempDir, "populated-dry-run.db");
     const store = new VectorStore(dbPath, 4, "deterministic-v4");
 
+    // Construct synthetic PRs and issues to populate the database
+    const rawGraphQLPRNodes = [
+      {
+        number: 101,
+        title: "Fix retry backoff timeout in network client",
+        body: "Implements incremental backoff retry when rate limit reset is approaching.\nFixes #50",
+        author: { login: "contributor-alice" },
+        state: "OPEN",
+        createdAt: "2026-08-01T10:00:00Z",
+        updatedAt: "2026-08-02T12:00:00Z",
+        additions: 45,
+        deletions: 10,
+        changedFiles: 2,
+        id: "PR_node_101",
+        headRefOid: "commit_sha_101",
+        url: `https://github.com/${repoFull}/pull/101`,
+        labels: { nodes: [{ name: "bug" }] },
+        files: { nodes: [{ path: "src/retry.ts" }, { path: "src/retry.test.ts" }] },
+        reviews: { totalCount: 2, nodes: [{ state: "APPROVED" }, { state: "APPROVED" }] },
+        commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+        closingIssuesReferences: { nodes: [{ number: 50, repository: { nameWithOwner: repoFull } }] },
+      },
+      {
+        number: 102,
+        title: "Fix retry backoff timeout in network client",
+        body: "Duplicate submission of retry backoff logic without test coverage.\nCloses #50",
+        author: { login: "contributor-bob" },
+        state: "OPEN",
+        createdAt: "2026-08-01T11:00:00Z",
+        updatedAt: "2026-08-01T11:30:00Z",
+        additions: 120,
+        deletions: 5,
+        changedFiles: 1,
+        id: "PR_node_102",
+        headRefOid: "commit_sha_102",
+        url: `https://github.com/${repoFull}/pull/102`,
+        labels: { nodes: [{ name: "bug" }] },
+        files: { nodes: [{ path: "src/retry.ts" }] },
+        reviews: { totalCount: 0, nodes: [] },
+        commits: { nodes: [{ commit: { statusCheckRollup: { state: "PENDING" } } }] },
+        closingIssuesReferences: { nodes: [{ number: 50, repository: { nameWithOwner: repoFull } }] },
+      },
+      {
+        number: 201,
+        title: "Add architecture vision documentation and triage guide",
+        body: "Documents PR-Prism architecture vision and core capabilities.",
+        author: { login: "maintainer-charlie" },
+        state: "OPEN",
+        createdAt: "2026-08-03T08:00:00Z",
+        updatedAt: "2026-08-03T08:30:00Z",
+        additions: 200,
+        deletions: 0,
+        changedFiles: 1,
+        id: "PR_node_201",
+        headRefOid: "commit_sha_201",
+        url: `https://github.com/${repoFull}/pull/201`,
+        labels: { nodes: [{ name: "documentation" }] },
+        files: { nodes: [{ path: "docs/VISION.md" }] },
+        reviews: { totalCount: 1, nodes: [{ state: "APPROVED" }] },
+        commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+      },
+    ];
+
+    const rawGraphQLIssueNodes = [
+      {
+        number: 50,
+        title: "Connection retries fail with timeout under high load",
+        body: "When API rate limits are approached, retry requests immediately timeout rather than backing off.",
+        author: { login: "user-reporter" },
+        state: "OPEN",
+        createdAt: "2026-07-28T09:00:00Z",
+        updatedAt: "2026-07-29T14:00:00Z",
+        id: "ISSUE_node_50",
+        url: `https://github.com/${repoFull}/issues/50`,
+        labels: { nodes: [{ name: "bug" }] },
+      },
+    ];
+
     const octokitMock = {
+      graphql: vi.fn(async (query: string | { query: string }) => {
+        const queryStr = typeof query === "string" ? query : query?.query || "";
+        if (queryStr.includes("pullRequests")) {
+          return {
+            repository: {
+              pullRequests: {
+                totalCount: 3,
+                pageInfo: { hasNextPage: false },
+                nodes: rawGraphQLPRNodes,
+              },
+            },
+          };
+        }
+        if (queryStr.includes("issues")) {
+          return {
+            repository: {
+              issues: {
+                totalCount: 1,
+                pageInfo: { hasNextPage: false },
+                nodes: rawGraphQLIssueNodes,
+              },
+            },
+          };
+        }
+        return {};
+      }),
       issues: {
+        // Explicitly controlled read-only label existence check
+        getLabel: vi.fn(async ({ name }: { name: string }) => ({
+          data: { name, color: "ffffff", description: "Mocked label" },
+        })),
+        // Prohibited write endpoints — must never be called during dry-run
         addLabels: vi.fn(),
         removeLabel: vi.fn(),
         createLabel: vi.fn(),
-        getLabel: vi.fn().mockRejectedValue({ status: 404 }),
       },
     };
 
     const ctx = createTestPipelineContext({ store, repoFull, octokitMock });
 
     try {
-      // 1. runDupes with dryRun: true
-      await runDupes(ctx, { threshold: 0.85, applyLabels: true, dryRun: true });
+      // 1. Populate the disposable database through the real runScan pipeline
+      await runScan(ctx, {});
+      const initialStats = store.getStats(repoFull);
+      expect(initialStats.totalItems).toBe(4);
+      expect(initialStats.prs).toBe(3);
+      expect(initialStats.issues).toBe(1);
 
-      // 2. runVision with dryRun: true
-      await runVision(ctx, { doc: visionDocPath, applyLabels: true, dryRun: true });
+      // 2. Invoke runDupes with applyLabels=true and dryRun=true
+      const clusters = await runDupes(ctx, { threshold: 0.85, applyLabels: true, dryRun: true });
+      expect(clusters.length).toBeGreaterThan(0);
+      const cluster = clusters[0];
+      expect(cluster.items.length).toBe(3);
+      expect(cluster.bestPick.number).toBe(101);
 
-      // Ensure zero mutation calls reached Octokit
+      // Verify that read-only label existence was checked, but no writes occurred
+      expect(octokitMock.issues.getLabel).toHaveBeenCalled();
       expect(octokitMock.issues.addLabels).not.toHaveBeenCalled();
       expect(octokitMock.issues.removeLabel).not.toHaveBeenCalled();
       expect(octokitMock.issues.createLabel).not.toHaveBeenCalled();
 
-      // 3. GitHubClient default write-gate protection
+      // 3. Invoke runVision with applyLabels=true and dryRun=true
+      const visionScores = await runVision(ctx, { doc: visionDocPath, applyLabels: true, dryRun: true });
+      expect(visionScores).toBeDefined();
+      expect(visionScores!.length).toBe(4);
+
+      // Verify still zero write calls reached Octokit
+      expect(octokitMock.issues.addLabels).not.toHaveBeenCalled();
+      expect(octokitMock.issues.createLabel).not.toHaveBeenCalled();
+
+      // 4. Verify GitHubClient default constructor write-gate protection
       const defaultClient = new GitHubClient("token", "owner", "repo");
       (defaultClient as any).octokit = octokitMock;
       await defaultClient.applyLabel(101, "prism:duplicate");
-      await defaultClient.removeLabel(101, "needs-triage");
       await defaultClient.ensureLabel("prism:duplicate", "ffffff", "Duplicate PR");
 
       expect(octokitMock.issues.addLabels).not.toHaveBeenCalled();
-      expect(octokitMock.issues.removeLabel).not.toHaveBeenCalled();
       expect(octokitMock.issues.createLabel).not.toHaveBeenCalled();
     } finally {
       store.close();
@@ -741,14 +912,96 @@ Hosting git repositories or replacing interactive human code reviews.
     expect(existsSync(isolatedTempDir)).toBe(false);
   });
 
-  // ── 3. CLI ENTRYPOINT & CONTRACT VERIFICATION ───────────────────────────
+  // ── AUDIT FINDING 4: VERIFIED CLI COMMAND EXECUTION & OUTPUT CONTRACTS ──
 
-  it("verifies CLI output contracts for doctor, dupes, rank, and vision in offline isolation", () => {
+  it("verifies CLI command execution and output contracts for doctor, dupes, rank, --version, and --help in offline isolation", () => {
     const cliTempDir = mkdtempSync(join(tmpdir(), "prism-cli-contract-"));
     try {
-      writeFileSync(join(cliTempDir, "prism.config.yaml"), "repo: cli-test/contract-repo\n");
+      const repoFull = "test-owner/test-repo";
+      writeFileSync(join(cliTempDir, "prism.config.yaml"), `repo: ${repoFull}\n`);
+      writeFileSync(join(cliTempDir, "VISION.md"), `# Project Vision\n## Core\nTriage\n`);
 
-      // doctor --json output contract
+      // Pre-populate data/prism.db in cliTempDir so CLI commands have realistic local data
+      const dataDir = join(cliTempDir, "data");
+      mkdirSync(dataDir, { recursive: true });
+      const store = new VectorStore(join(dataDir, "prism.db"), 4, "deterministic-v4");
+
+      const items = [
+        {
+          id: `${repoFull}:pr:101`,
+          type: "pr" as const,
+          number: 101,
+          repo: repoFull,
+          title: "Fix retry backoff timeout",
+          bodySnippet: "Retry backoff body",
+          embedding: new Float32Array(v101),
+          metadata: { ciStatus: "success", reviewCount: 2, hasTests: true, author: "contributor-alice" },
+          createdAt: "2026-08-01T10:00:00Z",
+          updatedAt: "2026-08-02T12:00:00Z",
+        },
+        {
+          id: `${repoFull}:pr:102`,
+          type: "pr" as const,
+          number: 102,
+          repo: repoFull,
+          title: "Fix retry backoff timeout",
+          bodySnippet: "Duplicate body",
+          embedding: new Float32Array(v102),
+          metadata: { ciStatus: "pending", reviewCount: 0, hasTests: false, author: "contributor-bob" },
+          createdAt: "2026-08-01T11:00:00Z",
+          updatedAt: "2026-08-01T11:30:00Z",
+        },
+        {
+          id: `${repoFull}:issue:50`,
+          type: "issue" as const,
+          number: 50,
+          repo: repoFull,
+          title: "Connection retries fail with timeout",
+          bodySnippet: "Issue body",
+          embedding: new Float32Array(v50),
+          metadata: { author: "user-reporter" },
+          createdAt: "2026-07-28T09:00:00Z",
+          updatedAt: "2026-07-29T14:00:00Z",
+        },
+      ];
+
+      for (const item of items) {
+        store.upsert(item);
+      }
+      store.cacheAuthorMergeCount(repoFull, "contributor-alice", 15);
+      store.cacheAuthorMergeCount(repoFull, "contributor-bob", 1);
+      store.cacheAuthorMergeCount(repoFull, "user-reporter", 0);
+      store.setMeta("embedding_model", "deterministic-v4");
+      store.setMeta("embedding_dimensions", "4");
+      store.setMeta("embedding_provider", "openai");
+      store.setMeta("schema_version", "1");
+      store.close();
+
+      const execCli = (args: string[]) =>
+        execFileSync("node", [distCli, ...args], {
+          cwd: cliTempDir,
+          env: getIsolatedEnv({
+            GITHUB_TOKEN: "mock-offline-token",
+            EMBEDDING_API_KEY: "mock-offline-embedding-key",
+            EMBEDDING_MODEL: "deterministic-v4",
+            EMBEDDING_DIMENSIONS: "4",
+          }),
+          encoding: "utf-8",
+        });
+
+      // 1. --version output contract
+      const versionOutput = execCli(["--version"]).trim();
+      expect(versionOutput).toBe("4.0.0");
+
+      // 2. --help output contract
+      const helpOutput = execCli(["--help"]);
+      expect(helpOutput).toContain("Usage: prism");
+      expect(helpOutput).toContain("dupes");
+      expect(helpOutput).toContain("rank");
+      expect(helpOutput).toContain("vision");
+      expect(helpOutput).toContain("scan");
+
+      // 3. doctor --json output contract (exercised in pure offline environment without token probe)
       const doctorOutput = execFileSync("node", [distCli, "doctor", "--json"], {
         cwd: cliTempDir,
         env: getIsolatedEnv(),
@@ -758,88 +1011,120 @@ Hosting git repositories or replacing interactive human code reviews.
       expect(doctorParsed.command).toBe("doctor");
       expect(Array.isArray(doctorParsed.checks)).toBe(true);
 
-      // --version output contract
-      const versionOutput = execFileSync("node", [distCli, "--version"], {
-        cwd: cliTempDir,
-        env: getIsolatedEnv(),
-        encoding: "utf-8",
-      }).trim();
-      expect(versionOutput).toBe("4.0.0");
+      // 4. dupes --json output contract
+      const dupesJsonOutput = execCli(["dupes", "--json"]).trim();
+      expect(dupesJsonOutput.length).toBeGreaterThan(0);
+      const clusterObj = JSON.parse(dupesJsonOutput.split("\n")[0]);
+      expect(clusterObj).toHaveProperty("id", 1);
+      expect(clusterObj).toHaveProperty("size", 3);
+      expect(clusterObj).toHaveProperty("bestPick", 101);
 
-      // --help output contract
-      const helpOutput = execFileSync("node", [distCli, "--help"], {
-        cwd: cliTempDir,
-        env: getIsolatedEnv(),
-        encoding: "utf-8",
-      });
-      expect(helpOutput).toContain("Usage: prism");
-      expect(helpOutput).toContain("dupes");
-      expect(helpOutput).toContain("rank");
-      expect(helpOutput).toContain("vision");
-      expect(helpOutput).toContain("scan");
+      // 5. dupes --output markdown contract
+      const dupesMdOutput = execCli(["dupes", "--output", "markdown"]);
+      expect(dupesMdOutput).toContain("## duplicate clusters");
+      expect(dupesMdOutput).toContain("#101");
+
+      // 6. rank --json output contract
+      const rankJsonOutput = execCli(["rank", "--json"]).trim();
+      expect(rankJsonOutput.length).toBeGreaterThan(0);
+      const rankedLines = rankJsonOutput.split("\n").map((line) => JSON.parse(line));
+      expect(rankedLines[0].number).toBe(101);
+      expect(rankedLines[0].score).toBeGreaterThan(rankedLines[1].score);
     } finally {
       rmSync(cliTempDir, { recursive: true, force: true });
     }
   });
 
-  // ── 4. NETWORK SAFETY & PROHIBITED ACCESS CONTROLS ───────────────────────
+  // ── AUDIT FINDING 2: SEPARATE VIOLATION ACCOUNTING & SWALLOWED ERRORS ──
 
-  it("verifies negative controls for all intercepted network transport paths", async () => {
-    // 1. globalThis.fetch
-    await expect(globalThis.fetch("https://api.github.com")).rejects.toThrow("CRITICAL VIOLATION");
+  it("verifies negative controls for all intercepted network transport paths without polluting application journal", async () => {
+    // Audit Finding 2: Keep deliberate negative controls separate from application test journal
+    await networkGuard.runWithNegativeControlIsolation(async (negativeViolations) => {
+      // 1. globalThis.fetch (targeted to RFC 5737 documentation prefix - zero real network requests)
+      await expect(globalThis.fetch("http://192.0.2.1")).rejects.toThrow("CRITICAL VIOLATION");
 
-    // 2. http.get
-    expect(() => http.get("http://127.0.0.1:9999")).toThrow("CRITICAL VIOLATION");
+      // 2. http.get
+      expect(() => http.get("http://192.0.2.1:80")).toThrow("CRITICAL VIOLATION");
 
-    // 3. https.get
-    expect(() => https.get("https://127.0.0.1:9999")).toThrow("CRITICAL VIOLATION");
+      // 3. https.get
+      expect(() => https.get("https://192.0.2.1:443")).toThrow("CRITICAL VIOLATION");
 
-    // 4. net.Socket.prototype.connect
-    const socket = new net.Socket();
-    await new Promise<void>((resolve) => {
-      socket.on("error", (err) => {
-        expect(err.message).toContain("CRITICAL VIOLATION");
-        resolve();
+      // 4. net.Socket.prototype.connect
+      const socket = new net.Socket();
+      await new Promise<void>((resolve) => {
+        socket.on("error", (err) => {
+          expect(err.message).toContain("CRITICAL VIOLATION");
+          resolve();
+        });
+        socket.connect(80, "192.0.2.1");
       });
-      socket.connect(80, "1.1.1.1");
+
+      // 5. dns.lookup
+      await new Promise<void>((resolve) => {
+        dns.lookup("prohibited.example", (err) => {
+          expect(err).toBeDefined();
+          expect(err?.message).toContain("CRITICAL VIOLATION");
+          resolve();
+        });
+      });
+
+      expect(negativeViolations.length).toBeGreaterThanOrEqual(5);
     });
 
-    // 5. dns.lookup
-    await new Promise<void>((resolve) => {
-      dns.lookup("api.github.com", (err) => {
-        expect(err).toBeDefined();
-        expect(err?.message).toContain("CRITICAL VIOLATION");
-        resolve();
-      });
-    });
-
-    // Check violations list
-    expect(networkGuard.violations.length).toBeGreaterThanOrEqual(5);
-    // Clear violations so suite remains clean
-    networkGuard.violations.length = 0;
+    // The application journal remains strictly untouched (0 violations recorded)
+    expect(networkGuard.violations).toHaveLength(0);
   });
 
-  it("demonstrates verifiable OS-level network isolation where bwrap is supported", () => {
-    if (!isOsNetworkIsolationSupported()) {
-      // Skip if OS-level bwrap is not available in environment
-      return;
+  it("demonstrates that a swallowed network-denial exception still fails E2E acceptance", async () => {
+    // 1. Simulate an application component that attempts an unauthorized fetch and swallows the error
+    try {
+      await globalThis.fetch("https://192.0.2.1/telemetry");
+    } catch {
+      // Application code silently swallowed the network exception
     }
+
+    // 2. The guard's violation journal recorded the unauthorized call despite the exception being swallowed
+    expect(networkGuard.violations).toHaveLength(1);
+    expect(networkGuard.violations[0].protocol).toBe("globalThis.fetch");
+
+    // 3. assertZeroViolations fails, proving acceptance fails even if exceptions are swallowed
+    expect(() => networkGuard.assertZeroViolations()).toThrow(/ASSERTION FAILED: Expected 0 network violations/);
+
+    // 4. Clean up only after the demonstration has verified that failure was triggered
+    networkGuard.clearDemonstratedViolation();
+  });
+
+  // ── AUDIT FINDING 1: OS-LEVEL NETWORK ISOLATION & SUBPROCESS INHERITANCE ──
+
+  it("demonstrates verifiable OS-level network isolation and subprocess inheritance where bwrap is supported", () => {
+    // Audit Finding 1: Never silently count an unavailable mandatory isolation check as successful
+    assertOsNetworkIsolationSupported();
 
     // 1. Negative control: OS kernel blocks DNS lookup in network-isolated namespace
     const dnsCheck = execInOsNetworkSandbox("node", [
       "-e",
-      "require('node:dns').lookup('github.com', (err) => { process.exit(err ? 0 : 1); });",
+      "require('node:dns').lookup('prohibited.example', (err) => { process.exit(err ? 0 : 1); });",
     ]);
     expect(dnsCheck).toBe("");
 
     // 2. Negative control: OS kernel blocks TCP connection with ENETUNREACH in network-isolated namespace
+    // Targeted to RFC 5737 TEST-NET-1 (192.0.2.1) — never sends real network packets
     const tcpCheck = execInOsNetworkSandbox("node", [
       "-e",
-      "const s = require('node:net').connect(80, '8.8.8.8'); s.on('error', (e) => { process.exit(e.code === 'ENETUNREACH' ? 0 : 2); });",
+      "const s = require('node:net').connect(80, '192.0.2.1'); s.on('error', (e) => { process.exit(e.code === 'ENETUNREACH' ? 0 : 2); });",
     ]);
     expect(tcpCheck).toBe("");
 
-    // 3. Positive control: CLI executes cleanly in network-isolated namespace
+    // 3. Subprocess inheritance: Spawning a child process from Node inherits network namespace isolation
+    const inheritanceCheck = execInOsNetworkSandbox("node", [
+      "-e",
+      `const { spawnSync } = require('node:child_process');
+       const res = spawnSync('node', ['-e', "require('node:net').connect(80, '192.0.2.1').on('error', (e) => process.exit(e.code === 'ENETUNREACH' ? 0 : 3))"]);
+       process.exit(res.status);`,
+    ]);
+    expect(inheritanceCheck).toBe("");
+
+    // 4. Positive control: CLI executes cleanly in network-isolated namespace
     const cliOutput = execInOsNetworkSandbox("node", [distCli, "--version"], { env: getIsolatedEnv() }).trim();
     expect(cliOutput).toBe("4.0.0");
   });

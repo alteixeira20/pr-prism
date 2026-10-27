@@ -1,10 +1,11 @@
 # INTEGRATION VALIDATION REPORT
 ## PR-Prism v4 — Three-Lane Modernization Integration & Final E2E Acceptance
 
-**Date:** 2026-10-26  
+**Date:** 2026-10-27  
 **Integration Branch:** `integrate/pr-prism-v4-modernization`  
 **Base Commit (v4.0.0 Baseline):** `12c8ef11d2cf4cb1e0ed79200cf5b44ee0a70e3c`  
-**Current HEAD:** `386fcb920c690b8fa65412f490f33218f3f31885`  
+**Audit Baseline Commit:** `c1ed5f5421b4689f80ff412f4f8a4c26ccc1c0ee`  
+**Final Acceptance Commit:** `5f3aa74c2be8b116d013201b9e09e85165eea0c5`  
 **Integration Status:** **PASS**  
 **Final Offline Acceptance Recommendation:** **PASS**
 
@@ -14,18 +15,18 @@
 
 All three modernization lanes (Jev Typed Decisions + Node 22+ engine update, Decomposed GitHub Client Modules, and Modular CLI Commands) were integrated into upstream PR-Prism v4 using sequential, non-fast-forward Git merges that preserve the complete immutable commit history of each approved lane.
 
-Following structural integration, this adversarial audit closed the remaining offline acceptance gaps:
-1. **Production Orchestration Proof:** Validated that synthetic items returned from a mocked GitHub transport flow through the actual production scan pipeline (`runScan`), are normalized, embedded, and persisted into a disposable SQLite database, and are subsequently consumed by duplicate detection (`runDupes`), multi-signal ranking (`runRank`), and vision alignment (`runVision`), with zero direct SQLite database pre-insertion.
-2. **Negative Scenarios & Robustness:** Verified GraphQL ingestion, REST fallback, controlled transport fetch failures, repeated scanning with skip-logic for unchanged items, metadata drift synchronization, SQLite persistence and database reopen fidelity across lifecycles, default dry-run write protection, invalid configuration rejection, and clean temp artifact removal upon failure.
-3. **Verifiable Network Isolation Boundary:** Established a dual-layer offline execution boundary combining comprehensive in-process interception (`globalThis.fetch`, `http.request`, `https.request`, `net.Socket.prototype.connect`, `tls.connect`, `dns.lookup`) with demonstrated OS-level network namespace isolation (`bwrap --unshare-net`) where supported on Linux. Negative controls prove prohibited network access is rejected at both layers.
-4. **Jev Scope & Documentation Accuracy:** Clarified the strict boundary between component-level decision tests (using `MockDecisionProvider`) and production pipeline orchestration (where Jev is disabled by default, advisory only, and not silently executed). Corrected misleading "calibrated probabilities" wording in `.env.example`, noting that decision routing scores are heuristic and have not been empirically calibrated.
-5. **Multi-Runtime Validation:** Clean native dependency builds (`better-sqlite3`) and test executions succeeded across both Node.js 22 (`v22.23.1`) and Node.js 24 (`v24.22.0`), achieving a 100% pass rate across all 52 test suites and 754 tests.
+Following an adversarial E2E acceptance audit, all acceptance evidence gaps have been definitively closed:
+1. **OS-Level Network Namespace Isolation:** Established a fully reproducible command to execute the entire `orchestrated-e2e.test.ts` suite inside Linux bubblewrap (`bwrap --unshare-net`) on supported hosts. Outbound TCP connection attempts are denied by the Linux kernel (`ENETUNREACH`), DNS is denied (`ENOTFOUND`), and child processes inherit network isolation. Non-supported hosts explicitly report unverified status via `assertOsNetworkIsolationSupported()`, never silently passing.
+2. **Strict Network Violation Accounting:** Every ordinary E2E test asserts zero unexpected violations in `afterEach(() => networkGuard.assertZeroViolations())`. Deliberate negative-control tests run in isolated violation sinks (`runWithNegativeControlIsolation`) without polluting or clearing the application journal. A dedicated test demonstrates that even if application code catches and swallows a network-denial exception, the guard's violation journal detects the attempt and fails acceptance. Patched globals and environment variables are strictly restored on all failure paths.
+3. **Populated Pipeline Dry-Run Safety:** Populated a disposable SQLite database through the actual `runScan` pipeline with 4 synthetic items. `runDupes` formed a non-empty duplicate cluster (3 items, canonical pick #101) and `runVision` generated non-empty vision alignment scores. When executed with `applyLabels: true, dryRun: true`, intended label actions were generated while zero GitHub write endpoints (`addLabels`, `createLabel`, `removeLabel`) were called. Read-only label-existence checks (`getLabel`) were explicitly controlled and mocked.
+4. **Verified Isolated CLI Execution:** Executed `node dist/cli.js` subprocess commands against disposable database fixtures in pure offline isolation for `dupes --json`, `dupes --output markdown`, `rank --json`, `doctor --json`, `--version`, and `--help`. Verified NDJSON output, markdown formatting, schema compliance, and version output contracts.
+5. **Multi-Runtime CI Verification:** Completed full CI pipelines under both Node.js 22 (`v22.23.1`) and Node.js 24 (`v24.22.0`) with clean native dependency builds (`better-sqlite3`), achieving 100% pass rates across all 52 test suites and 755 tests.
 
 ---
 
 ### 2. Multi-Tier Integration Architecture
 
-To ensure audit clarity, validation is evaluated across three decoupled tiers:
+Validation is evaluated across three decoupled tiers:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -48,13 +49,13 @@ To ensure audit clarity, validation is evaluated across three decoupled tiers:
 ┌────────────────────────────────────────────────────────────────────────┐
 │                         TIER 3: CLI ENTRYPOINT E2E                     │
 │   • Direct-Run Detection: isDirectRun() via realpathSync               │
-│   • Output Contracts: doctor, dupes, rank, vision (--json, markdown)   │
+│   • Command Handlers: doctor, dupes, rank (--json, markdown)           │
 │   • CLI Help & Version: 14 commands, exact v4.0.0 semver contract      │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
 #### Tier 1: Component Integration
-- **GitHub Client Public Facade:** `src/github.ts` exports exactly 5 backward-compatible symbols (`GitHubClient`, `accountIsBot`, `itemClosedAt`, `mapClosingIssues`, `restPRState`) and all 19 public methods on `GitHubClient`.
+- **GitHub Client Facade:** `src/github.ts` exports 5 backward-compatible symbols (`GitHubClient`, `accountIsBot`, `itemClosedAt`, `mapClosingIssues`, `restPRState`) and all 19 public methods on `GitHubClient`.
 - **Modular CLI Commands:** Commands reside in isolated modules under `src/cli/commands/`, registering options and handlers cleanly on Commander instances.
 - **Decision Engine Separation:** `src/decisions/` encapsulates Jev schemas, sanitizer, rubric hashing, and evaluator. Defaults to `DisabledDecisionProvider` when `decisions.enabled === false`.
 
@@ -64,7 +65,7 @@ To ensure audit clarity, validation is evaluated across three decoupled tiers:
 - All data in SQLite originates from `runScan` processing transport items.
 
 #### Tier 3: CLI Entrypoint & Contract E2E
-- Subprocess characterization tests invoke `dist/cli.js` using Node.js child process execution under sanitized environments.
+- Subprocess execution tests invoke `dist/cli.js` using Node.js child process execution under sanitized, isolated environments.
 - Direct execution vs library import safety is verified across symlinks, relative paths, and TSX direct execution.
 - Command-line serialization contracts (`--json`, `--output markdown`) match schema specifications.
 
@@ -72,200 +73,128 @@ To ensure audit clarity, validation is evaluated across three decoupled tiers:
 
 ### 3. Changed-File & Test Accounting
 
-Across all three modernization lanes and both E2E validation test harnesses:
-
 | Category | File Count | Additions | Deletions | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | **Production Source** | 46 files | +3,485 | -2,118 | Decomposed CLI, modular GitHub, Jev layer |
 | **Unit & Integration Tests** | 35 files | +6,635 | 0 | Unit, characterization, direct-run tests |
-| **E2E Test Infrastructure** | 3 files | +1,245 | 0 | `offline-e2e.test.ts`, `orchestrated-e2e.test.ts`, `network-sandbox.ts` |
-| **Documentation & Config** | 7 files | +620 | -3 | Env configs, validation reports, architecture |
-| **Total** | **91 files** | **+11,985** | **-2,121** | **Clean local diff** |
+| **E2E Test Infrastructure** | 3 files | +1,380 | 0 | `offline-e2e.test.ts`, `orchestrated-e2e.test.ts`, `network-sandbox.ts` |
+| **Documentation & Config** | 7 files | +640 | -3 | Env configs, validation reports, architecture |
+| **Total** | **91 files** | **+12,140** | **-2,121** | **Clean local diff** |
 
-#### Key Acceptance Files Added / Updated in Final E2E Phase
-- `src/__tests__/orchestrated-e2e.test.ts`: Deterministic production orchestrator scenario and negative scenario test suite (10 tests).
-- `src/__tests__/network-sandbox.ts`: Multi-protocol network interception guard and OS-level network isolation runner.
+#### Key Acceptance Files
+- `src/__tests__/orchestrated-e2e.test.ts`: Deterministic production orchestrator scenario, negative scenarios, populated pipeline dry-run, isolated CLI command execution, and OS-level network isolation (11 tests).
+- `src/__tests__/network-sandbox.ts`: Multi-protocol network interception guard, scoped negative-control isolation runner, active network namespace detection, and `bwrap --unshare-net` executor.
 - `src/__tests__/offline-e2e.test.ts`: Preserved component-level offline E2E pipeline test harness.
 - `.env.example`: Corrected heuristic decision score explanation (removed inaccurate "calibrated probabilities" claim).
-- `INTEGRATION-VALIDATION-REPORT.md`: Comprehensive audit report with precise tier boundaries and evidence.
+- `INTEGRATION-VALIDATION-REPORT.md`: Comprehensive audit report with precise evidence breakdown.
 
 ---
 
-### 4. Multi-Runtime CI Validation Results
+### 4. Separate Validation Results
 
-Testing was conducted sequentially under both supported Node.js LTS runtimes. Before running tests in each runtime, native dependencies (`better-sqlite3`) were cleanly rebuilt via `npm rebuild better-sqlite3`.
+#### A. Regular CI Results
+Testing was executed across both supported Node.js LTS runtimes. Before running tests in each runtime, native dependencies (`better-sqlite3`) were cleanly rebuilt via `npm rebuild better-sqlite3`.
 
-| Validation Step | Node.js 22 (`v22.23.1`) | Node.js 24 (`v24.22.0`) | Notes |
+| Validation Step | Node.js 22 (`v22.23.1`) | Node.js 24 (`v24.22.0`) | Result |
 | :--- | :--- | :--- | :--- |
-| **Clean Build** (`npm run build`) | **PASS** | **PASS** | `dist/` compiled via `tsc -p tsconfig.build.json` |
-| **Lint Check** (`npm run lint`) | **PASS** (131 files) | **PASS** (131 files) | Biome check; 0 errors, 0 warnings |
-| **Format Check** (`npm run format`) | **PASS** (131 files) | **PASS** (131 files) | 0 unformatted files |
-| **Strict Typecheck** (`npm run typecheck`) | **PASS** | **PASS** | `tsc --noEmit` on root and `server/tsconfig.json` |
+| **Clean Build** (`npm run build`) | PASS | PASS | `dist/` compiled via `tsc -p tsconfig.build.json` |
+| **Lint Check** (`npm run lint`) | PASS (131 files) | PASS (131 files) | Biome check; 0 errors, 0 warnings |
+| **Strict Typecheck** (`npm run typecheck`) | PASS | PASS | `tsc --noEmit` on root and `server/tsconfig.json` |
 | **Vitest Test Suites** | **52 / 52 Passed** | **52 / 52 Passed** | 100% test file pass rate |
-| **Total Tests** | **754 / 754 Passed** | **754 / 754 Passed** | 0 failed, 0 skipped |
-| **CLI Version Output** | **PASS** (`4.0.0`) | **PASS** (`4.0.0`) | Matches package.json semver |
-| **CLI Help Output** | **PASS** (14 commands) | **PASS** (14 commands) | Full option & command tree displayed |
-| **CLI Direct-Run Safety** | **7 / 7 Passed** | **7 / 7 Passed** | Symlink and module import safety verified |
+| **Total Tests** | **755 / 755 Passed** | **755 / 755 Passed** | 0 failed, 0 skipped |
+| **CLI Version Output** | PASS (`4.0.0`) | PASS (`4.0.0`) | Matches package.json semver |
+| **CLI Help Output** | PASS (14 commands) | PASS (14 commands) | Full option & command tree displayed |
 
----
-
-### 5. Production Orchestration Verification
-
-The orchestrated E2E test (`src/__tests__/orchestrated-e2e.test.ts`) verifies the real lifecycle across production functions:
-
-$$\text{Mock Transport} \xrightarrow{\text{Octokit}} \text{runScan()} \xrightarrow{\text{Embed \& Store}} \text{SQLite} \xrightarrow{\text{Read}} \begin{cases} \text{runDupes()} & \longrightarrow \text{Clustering \& Canonical Pick} \\ \text{runRank()} & \longrightarrow \text{Scorer Context \& Ranking} \\ \text{runVision()} & \longrightarrow \text{VisionDoc Alignment} \end{cases}$$
-
-#### Verified Flow & Contracts
-1. **Mocked GitHub Transport:** The Octokit instance is configured with synthetic fixtures:
-   - PR #101: Contributor Alice, title *"Fix retry backoff timeout in network client"*, fixes Issue #50, includes test file `src/__tests__/retry.test.ts` (`hasTests: true`), approved reviews (`reviewCount: 2`), CI `SUCCESS`.
-   - PR #102: Contributor Bob, duplicate submission without tests, CI `PENDING`.
-   - Issue #50: Reporter bug report *"Connection retries fail with timeout under high load"*.
-2. **runScan Ingestion:**
-   - Transport calls `github.fetchPRsGraphQL` and `github.fetchIssuesGraphQL`.
-   - `normalizeGraphQLPR` and `normalizeGraphQLIssue` normalize nodes into canonical `PRItem` objects.
-   - Items are batched and embedded using `deterministicEmbedder.embedBatch()`.
-   - Items and Float32Array embeddings are inserted into SQLite via `store.upsert()`.
-   - **Verification:** Verified SQLite row count (2 PRs, 1 issue), metadata fields, and vector storage. No direct SQLite insertion occurred in the test setup.
-3. **runDupes Ingestion from SQLite:**
-   - Queries items from `store.getAllItems()`.
-   - Runs `findDuplicateClusters()` using vector cosine similarity.
-   - Identifies cluster containing #101, #102, and #50 with avg similarity $> 0.85$.
-   - Selects PR #101 as canonical best pick (due to tests, passing CI, and approvals).
-4. **runRank Scoring from SQLite:**
-   - Queries items from `store.getAllItems()`.
-   - Computes `buildScorerContext()` using author merge history.
-   - Evaluates multi-signal scores via `rankPRs()`.
-   - Verifies PR #101 ranks above PR #102 ($0.78$ vs $0.35$).
-5. **runVision Alignment from SQLite:**
-   - Reads `VISION.md` fixture from temp directory.
-   - Embeds vision document sections.
-   - Evaluates cosine similarity of SQLite items against vision sections.
-   - Returns structured `VisionScore[]` array.
-
----
-
-### 6. Negative Scenarios & Robustness Audit
-
-Deterministic negative scenarios verified pipeline resilience against adverse conditions:
-
-| Negative Scenario | Verification Mechanism | Observed Result | Status |
+#### B. Production Orchestrator E2E Results (`src/__tests__/orchestrated-e2e.test.ts`)
+| Test Case | Duration | Result | Verifications |
 | :--- | :--- | :--- | :--- |
-| **REST Fallback** | `runScan(ctx, { useRest: true })` | Ingested REST PRs/issues via `pulls.list` / `issues.listForRepo` | **PASS** |
-| **Controlled Transport Failure** | Mock transport rejects with connection error | `runScan` throws cleanly; SQLite database remains uncorrupted | **PASS** |
-| **Repeated Scan Skip** | Re-running `runScan` with unchanged `updatedAt` | `embedder.embedBatch` call count unchanged (0 new embeddings) | **PASS** |
-| **Metadata Drift Refresh** | Changed CI status with identical `updatedAt` | `refreshMetadata()` updates SQLite without re-running vector embeddings | **PASS** |
-| **SQLite Reopen Lifecycle** | Explicit `store.close()` followed by fresh instantiation | All tables, metadata, items, and vectors reloaded with 100% fidelity | **PASS** |
-| **Default Dry-Run Protection** | `runDupes` and `runVision` with dry-run flag | `octokit.issues.addLabels` not called; zero mutations to GitHub | **PASS** |
-| **Default Client Write-Gate** | `new GitHubClient()` constructor | Default `"dry-run"` gate intercepts write calls to `gate.journal` | **PASS** |
-| **Invalid Duration Configuration** | `runScan(ctx, { since: "invalid-duration" })` | Rejects with `Invalid duration: invalid-duration` | **PASS** |
-| **Incompatible Vector Hash** | Changed model/dims on populated database | Refuses write with `embedding configuration changed...` | **PASS** |
-| **Failure Artifact Cleanup** | Simulated pipeline failure in `try...finally` | `rmSync(tempDir)` executed; 0 orphaned files or DB locks retained | **PASS** |
+| **Real Scan Flow into SQLite** | ~925ms | **PASS** | Items from mocked GraphQL flow through `runScan` into SQLite and feed `runDupes`, `runRank`, `runVision`. No direct SQLite seeding. |
+| **REST Fallback & Transport Failure** | ~5ms | **PASS** | `useRest: true` ingests items; transport connection failure throws cleanly without corrupting SQLite database. |
+| **Repeated Scan & Metadata Drift** | ~4ms | **PASS** | Re-scan with identical `updatedAt` skips embedding; CI metadata drift updates SQLite without re-embedding. |
+| **SQLite Persistence & Reopen** | ~4ms | **PASS** | Explicit `store.close()` followed by reopening verifies 100% data and vector fidelity across process lifecycles. |
+| **Populated Pipeline Dry-Run Safety** | ~6ms | **PASS** | Populated 4 items, formed cluster (size 3, best pick #101), generated vision scores; with `applyLabels: true, dryRun: true`, 0 write endpoints called. |
+| **Invalid Configuration Rejection** | ~3ms | **PASS** | Rejects invalid duration strings and detects incompatible embedding hash mismatch on existing database. |
+| **Failure Cleanup Verification** | ~1ms | **PASS** | Demonstrates local temp directory and database cleanup in `try...finally` blocks upon simulated pipeline failure. |
+| **Isolated CLI Command Execution** | ~980ms | **PASS** | Executes `dist/cli.js` for `dupes --json`, `dupes --output markdown`, `rank --json`, `doctor --json`, `--version`, and `--help`. |
+| **Negative Network Controls** | ~5ms | **PASS** | Verifies in-process interception across fetch, http, https, net sockets, and dns using RFC 5737 documentation IPs. |
+| **Swallowed Exception Detection** | ~1ms | **PASS** | Proves swallowed network errors still fail acceptance via violation accounting. |
+| **OS Network Isolation & Inheritance** | ~270ms | **PASS** | Verifies kernel-level DNS blocking, TCP `ENETUNREACH`, and subprocess namespace inheritance via `bwrap --unshare-net`. |
 
----
-
-### 7. Network Safety & Verifiable Execution Boundary
-
-The audit established a clear, demonstrable distinction between in-process monkeypatching and OS-level network isolation:
-
-#### Layer 1: In-Process Transport Interception (`src/__tests__/network-sandbox.ts`)
-Hooks and blocks all high-level Node.js network APIs:
-- `globalThis.fetch`: Blocked at the global undici dispatcher level.
-- `http.request` & `http.get`: Blocked at the Node HTTP client level.
-- `https.request` & `https.get`: Blocked at the Node HTTPS client level.
-- `net.Socket.prototype.connect`: Intercepts and destroys all outgoing TCP socket connections (allows local unix domain sockets for IPC).
-- `tls.connect`: Intercepts all TLS socket handshakes.
-- `dns.lookup` & `dns.promises.lookup`: Intercepts and rejects all hostname resolution attempts.
-
-**Negative Control Evidence (In-Process):**
-All 5 paths were triggered in negative control tests (`it("verifies negative controls for all intercepted network transport paths")`). Each path threw `CRITICAL VIOLATION` and was recorded in `networkGuard.violations`. Zero external network calls escaped.
-
-#### Layer 2: OS-Level Network Namespace Isolation (`bwrap --unshare-net`)
-Where supported by the host Linux kernel (via unprivileged user namespaces), child processes run within a detached network namespace with no external network interfaces:
-- Outbound raw TCP sockets fail with **`ENETUNREACH`** (Network unreachable) from the Linux kernel.
-- Outbound DNS resolution fails with **`ENOTFOUND`** from the Linux kernel.
-- CLI commands (`node dist/cli.js --version`) execute cleanly inside this network-less namespace.
-
-**Negative Control Evidence (OS-Level):**
+#### C. OS-Isolated Execution Results
+The complete `orchestrated-e2e.test.ts` suite was executed directly inside a detached Linux network namespace:
 ```bash
-bwrap --unshare-net --dev-bind / / node -e "require('node:dns').lookup('github.com', (err) => process.exit(err ? 0 : 1))"
-# Exited 0 (DNS blocked by kernel)
-
-bwrap --unshare-net --dev-bind / / node -e "const s = require('node:net').connect(80, '8.8.8.8'); s.on('error', (e) => process.exit(e.code === 'ENETUNREACH' ? 0 : 2))"
-# Exited 0 (TCP connect blocked with ENETUNREACH by kernel)
+bwrap --unshare-net --dev-bind / / npx vitest run src/__tests__/orchestrated-e2e.test.ts
 ```
+- **Execution Environment:** Linux kernel with unprivileged user namespace; network device list contains exclusively `lo` (`/proc/net/dev` interfaces: `['lo']`).
+- **Suite Outcome:** **11 passed / 11 passed** (Duration: 2.86s).
+- **Subprocess Inheritance:** Child processes spawned via `execFileSync` / `spawnSync` inside the sandbox inherit the network-isolated namespace without external connectivity.
+- **Kernel-Level Denial:** Outbound TCP connect attempts to RFC 5737 documentation IP (`192.0.2.1:80`) immediately fail with `ENETUNREACH` directly from the OS kernel. DNS resolution to `prohibited.example` fails with `ENOTFOUND`.
 
-#### Documented Boundary Limits
-- **In-Process Monkeypatch Limit:** Does not prevent native C/C++ compiled Node addons from opening raw file descriptors via direct `libc` `socket()` syscalls.
-- **OS-Level Sandbox Limit:** Requires Linux `bwrap` or kernel user namespace support; in environments where unprivileged namespaces are disallowed (e.g. certain locked-down container hosts), in-process interception serves as the validated fallback.
+#### D. Negative-Control Results
+- **Negative Control Isolation:** Deliberate network denial tests are executed within `runWithNegativeControlIsolation`, routing generated violation records to a temporary control sink and leaving the application test journal completely clean (0 violations).
+- **Swallowed Error Detection:** In `demonstrates that a swallowed network-denial exception still fails E2E acceptance`, an unauthorized `globalThis.fetch("https://192.0.2.1/telemetry")` is executed and swallowed in a `try...catch` block. The guard records the violation in the application journal, and `assertZeroViolations()` throws `ASSERTION FAILED: Expected 0 network violations, but recorded 1`, demonstrating that swallowed network exceptions cannot bypass E2E acceptance.
+- **RFC 5737 Compliance:** All negative controls use documentation address prefixes (`192.0.2.1` and `prohibited.example`). Zero packets are ever emitted to external network infrastructure.
 
----
+#### E. Pipeline Write-Safety Results
+- **Dry-Run Mode Enforcement:** `runDupes` and `runVision` were invoked with `{ applyLabels: true, dryRun: true }` on a database populated with 3 PRs and 1 issue.
+- **Intended Actions Generated:** 4 label actions were identified for application (clusters and vision alignment).
+- **Zero GitHub Mutations:** Mocked Octokit spies confirmed zero write calls reached GitHub:
+  - `octokitMock.issues.addLabels`: **0 calls**
+  - `octokitMock.issues.removeLabel`: **0 calls**
+  - `octokitMock.issues.createLabel`: **0 calls**
+- **Controlled Read-Only Checks:** Label existence was verified via mocked read-only `octokit.issues.getLabel` calls, routed deterministically through the prototype-hooked `writeContext`.
+- **Default Client Write-Gate:** Calling `applyLabel` or `ensureLabel` on a default `new GitHubClient()` instance without an explicit `"apply"` gate records intended mutations to `gate.journal` and never touches GitHub API endpoints.
 
-### 8. Jev Scope, Advisory Routing, and Heuristic Calibration Note
-
-1. **Default Inactivity:**  
-   `decisions.enabled` remains strictly `false` by default. When disabled, `createDecisionProvider()` returns `DisabledDecisionProvider` which performs zero inference and incurs zero network or token costs.
-2. **Advisory Role:**  
-   The typed decision layer provides purely advisory routing tags (`security_escalation`, `expert_investigation`, `maintainer_triage`, `routine_review`, `needs_reproduction`, `documentation_only`). It cannot close PRs, reject issues, or alter vector clustering.
-3. **No Hidden Production Wiring:**  
-   Production orchestration functions (`runScan`, `runDupes`, `runRank`, `runVision`) do NOT import or invoke Jev. Jev decision evaluation is an opt-in analytical overlay invoked via dedicated modules.
-4. **Correction of Misleading Documentation:**  
-   `.env.example` previously claimed that Jev provides *"calibrated probabilities"*. This phrasing has been corrected to:
-   ```env
-   # Uses TypeSafe AI's System One model (Jev) for typed judgments and advisory routing scores (heuristic; not empirically calibrated)
-   ```
-   Routing scores and thresholds are heuristic rules and have not been empirically calibrated against large-scale ground truth datasets.
-
----
-
-### 9. Documented Remaining Limitations in Offline Mode
-
-1. **Synthetic vs High-Dimensional Semantic Embeddings:**  
-   Offline validation uses deterministic 4-dimensional unit vectors to mathematically verify cosine similarity and single-linkage clustering. Production deployments utilize high-dimensional models (1536D for OpenAI `text-embedding-3-small`, 1024D for Jina/VoyageAI), which require live provider endpoints or local Ollama instances.
-2. **Deep PR Review LLM Integration:**  
-   The `prism review <number>` command generates diff summaries and automated code comments using external LLMs (OpenCode, OpenAI, Anthropic, or Ollama). In offline validation, LLM calls are disabled.
-3. **Live GitHub Mutations:**  
-   Applying labels or posting comments to GitHub requires a valid `GITHUB_TOKEN` with write permissions and `PRISM_APPLY=1` (or `--apply-labels`). Under test conditions, `WriteGate` operates in `"dry-run"` mode, recording intended actions to `journal` without executing network requests.
-4. **GitHub GraphQL Complexity Limits:**  
-   In live environments, large repositories may encounter secondary rate limits or query depth throttling. Offline tests verify pagination algorithms up to synthetic limits but do not simulate GitHub's dynamic server-side node budget recalculation.
+#### F. Documented Remaining Limitations & Unverified Protections
+1. **In-Process vs OS-Level Isolation Boundaries:**  
+   - In-process monkeypatching intercepts JavaScript-level APIs (`globalThis.fetch`, `http.request`, `https.request`, `net.Socket.prototype.connect`, `tls.connect`, `dns.lookup`). It does not restrict compiled C/C++ native addons executing direct `libc` `socket()` syscalls.
+   - OS-level network namespace isolation (`bwrap --unshare-net`) enforces kernel-level packet blocking. It requires host kernel user namespace support. On environments where user namespaces are prohibited, OS-level isolation is reported as unverified (`assertOsNetworkIsolationSupported` throws an explicit error).
+2. **Production Crash vs Local Fixture Cleanup:**  
+   - Test cleanup verification (`verifies failure cleanup without retained temp artifacts`) demonstrates local test fixture removal in `try...finally` blocks.
+   - Production failure handling in `pipeline.ts` ensures unhandled exceptions bubble with descriptive errors and closes active database connections, but by design does not delete persistent database files (`data/prism.db`) upon crashes, preserving user data for debugging.
+3. **Synthetic Embeddings vs Production Inference:**  
+   - Tests execute with deterministic 4D unit vectors to verify mathematical clustering and cosine similarity. Production deployments require 1536D (OpenAI) or 1024D (VoyageAI/Jina) models, which require external API endpoints or local Ollama instances.
+4. **Advisory Decisions vs Production Pipeline:**  
+   - Jev decisions remain disabled by default (`decisions.enabled: false`) and are strictly advisory. Production triage functions do not execute Jev inference. Decision score thresholds are heuristic and have not been empirically calibrated.
 
 ---
 
-### 10. Reproduction Commands
-
-To reproduce the complete validation locally:
+### 5. Exact Reproducibility Instructions
 
 ```bash
-# 1. Ensure worktree is on the integration branch
+# 1. Switch to integration branch
 cd ~/Projects/pr-prism-integration
 git checkout integrate/pr-prism-v4-modernization
 
-# 2. Validate under Node.js 22 (LTS)
+# 2. Run complete CI under Node.js 22 (LTS)
 export PATH="/home/alteixeira20/.nvm/versions/node/v22.23.1/bin:$PATH"
 node -v  # v22.23.1
 npm rebuild better-sqlite3
 npm run ci
-npx vitest run src/__tests__/offline-e2e.test.ts
-npx vitest run src/__tests__/orchestrated-e2e.test.ts
 
-# 3. Validate under Node.js 24 (Current)
+# 3. Run complete CI under Node.js 24 (Current)
 export PATH="/home/alteixeira20/.nvm/versions/node/v24.22.0/bin:$PATH"
 node -v  # v24.22.0
 npm rebuild better-sqlite3
 npm run ci
-npx vitest run src/__tests__/offline-e2e.test.ts
+
+# 4. Run production orchestrator suite under OS-level network isolation (Linux)
+bwrap --unshare-net --dev-bind / / npx vitest run src/__tests__/orchestrated-e2e.test.ts
+
+# 5. Run production orchestrator suite directly
 npx vitest run src/__tests__/orchestrated-e2e.test.ts
 ```
 
 ---
 
-### 11. Final Acceptance Recommendation
+### 6. Final Acceptance Recommendation
 
 **FINAL RECOMMENDATION: PASS**
 
 The integration branch `integrate/pr-prism-v4-modernization` satisfies all adversarial acceptance criteria:
-- **100% CI Pass Rate:** 52 test suites, 754 tests passing under both Node.js 22 and Node.js 24.
-- **Production Orchestration Verified:** Real data flow through `runScan` $\rightarrow$ SQLite $\rightarrow$ `runDupes` / `runRank` / `runVision` proven with zero direct database seeding.
-- **Offline Network Isolation Demonstrated:** In-process multi-protocol socket guard and OS-level network namespace isolation (`bwrap --unshare-net`) proven with negative controls.
-- **Default Read-Only Safety:** Dry-run write protection guarantees zero unauthorized GitHub mutations.
-- **Jev Integrity:** Disabled by default, purely advisory, uncalibrated wording corrected in `.env.example`.
-- **Zero Production Branch Mutations & History Preserved:** Non-fast-forward merge graph intact.
+- **100% Multi-Runtime CI Pass Rate:** 52 test suites, 755 tests passing cleanly on both Node.js 22 and Node.js 24.
+- **Genuine Production Orchestration:** Synthetic PRs and issues travel through real `runScan` ingestion into SQLite and feed downstream clustering (`runDupes`), multi-signal ranking (`runRank`), and vision alignment (`runVision`).
+- **Verifiable Kernel Network Isolation:** Full orchestrator test suite executes successfully inside `bwrap --unshare-net` with kernel TCP denial (`ENETUNREACH`) and child process namespace inheritance.
+- **Robust Violation Accounting:** Unexpected network connection attempts fail acceptance even when swallowed by application code; deliberate negative controls are cleanly isolated from the application journal.
+- **Populated Pipeline Dry-Run Safety:** Proven write-protection with 0 GitHub write calls made across non-empty clusters and vision scores.
+- **Zero Production Mutations & Pure Local History:** Merges preserve upstream lane integrity without pushing or altering upstream branches.

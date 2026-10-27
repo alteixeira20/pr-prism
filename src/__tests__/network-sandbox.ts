@@ -1,5 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import dns from "node:dns";
+import { readFileSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
@@ -12,9 +13,11 @@ export interface NetworkViolation {
 }
 
 export interface NetworkGuard {
-  violations: NetworkViolation[];
+  readonly violations: readonly NetworkViolation[];
   restore: () => void;
   assertZeroViolations: () => void;
+  clearDemonstratedViolation: () => void;
+  runWithNegativeControlIsolation: <T>(fn: (negativeViolations: NetworkViolation[]) => Promise<T> | T) => Promise<T>;
 }
 
 /**
@@ -22,7 +25,8 @@ export interface NetworkGuard {
  * raw net.Socket, tls, and dns to establish a strict offline boundary.
  */
 export function installNetworkGuard(): NetworkGuard {
-  const violations: NetworkViolation[] = [];
+  const applicationViolations: NetworkViolation[] = [];
+  let activeNegativeControlSink: NetworkViolation[] | null = null;
 
   const originalFetch = globalThis.fetch;
   const originalHttpRequest = http.request;
@@ -40,7 +44,11 @@ export function installNetworkGuard(): NetworkGuard {
       target,
       timestamp: Date.now(),
     };
-    violations.push(violation);
+    if (activeNegativeControlSink) {
+      activeNegativeControlSink.push(violation);
+    } else {
+      applicationViolations.push(violation);
+    }
     const err = new Error(
       `CRITICAL VIOLATION: Offline network guard intercepted prohibited ${protocol} call` +
         (target ? ` to ${target}` : ""),
@@ -49,7 +57,7 @@ export function installNetworkGuard(): NetworkGuard {
     return err;
   };
 
-  // 1. globalThis.fetch
+  // 1. globalThis.fetch (intercepted before any undici connection)
   globalThis.fetch = (async (input: any, ..._args: any[]) => {
     const target = typeof input === "string" ? input : input?.url || String(input);
     throw recordViolation("globalThis.fetch", target);
@@ -79,14 +87,12 @@ export function installNetworkGuard(): NetworkGuard {
 
   // 4. net.Socket.prototype.connect (intercepts all TCP connection attempts)
   net.Socket.prototype.connect = function (...args: any[]) {
-    // If connecting to a unix domain socket / local IPC pipe (e.g. string path or options.path), allow IPC
+    // If connecting to a unix domain socket / local IPC pipe, allow local IPC
     const firstArg = args[0];
     if (typeof firstArg === "string" && !firstArg.includes(":")) {
-      // Unix domain socket path
       return originalNetConnect.apply(this, args as any);
     }
     if (typeof firstArg === "object" && firstArg !== null && typeof firstArg.path === "string") {
-      // Unix domain socket options
       return originalNetConnect.apply(this, args as any);
     }
 
@@ -142,26 +148,70 @@ export function installNetworkGuard(): NetworkGuard {
   };
 
   const assertZeroViolations = () => {
-    if (violations.length > 0) {
+    if (applicationViolations.length > 0) {
       throw new Error(
-        `ASSERTION FAILED: Expected 0 network violations, but recorded ${violations.length}:\n` +
-          violations.map((v) => `  - [${v.protocol}] ${v.target ?? "unspecified"}`).join("\n"),
+        `ASSERTION FAILED: Expected 0 network violations, but recorded ${applicationViolations.length}:\n` +
+          applicationViolations.map((v) => `  - [${v.protocol}] ${v.target ?? "unspecified"}`).join("\n"),
       );
     }
   };
 
+  const clearDemonstratedViolation = () => {
+    applicationViolations.length = 0;
+  };
+
+  const runWithNegativeControlIsolation = async <T>(
+    fn: (negativeViolations: NetworkViolation[]) => Promise<T> | T,
+  ): Promise<T> => {
+    const scopedSink: NetworkViolation[] = [];
+    const prevSink = activeNegativeControlSink;
+    activeNegativeControlSink = scopedSink;
+    try {
+      return await fn(scopedSink);
+    } finally {
+      activeNegativeControlSink = prevSink;
+    }
+  };
+
   return {
-    violations,
+    get violations() {
+      return applicationViolations;
+    },
     restore,
     assertZeroViolations,
+    clearDemonstratedViolation,
+    runWithNegativeControlIsolation,
   };
 }
 
 /**
- * Checks whether Linux bubblewrap (bwrap) is available with unshare-net support.
+ * Returns true if the current Linux process is running inside an isolated network namespace
+ * where /proc/net/dev contains only the loopback interface.
+ */
+export function isCurrentProcessInNetworkNamespace(): boolean {
+  if (process.platform !== "linux") return false;
+  try {
+    const content = readFileSync("/proc/net/dev", "utf-8");
+    const interfaces = content
+      .split("\n")
+      .slice(2)
+      .map((line) => line.split(":")[0]?.trim())
+      .filter(Boolean);
+    return interfaces.length === 1 && interfaces[0] === "lo";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Checks whether Linux bubblewrap (bwrap) or an active isolated network namespace
+ * is available with unshare-net support.
  */
 export function isOsNetworkIsolationSupported(): boolean {
   if (process.platform !== "linux") return false;
+  // If the current process is already inside a kernel-isolated network namespace,
+  // OS-level isolation is verified and active.
+  if (isCurrentProcessInNetworkNamespace()) return true;
   try {
     const result = spawnSync("bwrap", ["--unshare-net", "--dev-bind", "/", "/", "true"], {
       stdio: "ignore",
@@ -174,22 +224,46 @@ export function isOsNetworkIsolationSupported(): boolean {
 }
 
 /**
+ * Asserts that Linux bubblewrap OS-level network isolation is available.
+ * Throws an explicit error if unsupported to ensure unsupported hosts are never
+ * silently counted as verified.
+ */
+export function assertOsNetworkIsolationSupported(): void {
+  if (!isOsNetworkIsolationSupported()) {
+    throw new Error(
+      "OS-level network isolation (bwrap --unshare-net) is UNVERIFIED on this host. " +
+        "Host kernel lacks unprivileged user namespace / bwrap support.",
+    );
+  }
+}
+
+/**
  * Executes a command inside an OS-level network-isolated sandbox (bwrap --unshare-net).
+ * If the current process is already inside an isolated network namespace, child processes
+ * inherit that isolation directly without nested bwrap invocation.
  */
 export function execInOsNetworkSandbox(
   cmd: string,
   args: string[],
   options: { cwd?: string; env?: NodeJS.ProcessEnv; timeout?: number } = {},
 ): string {
-  if (!isOsNetworkIsolationSupported()) {
-    throw new Error("OS-level network isolation (bwrap --unshare-net) is not supported on this host");
+  assertOsNetworkIsolationSupported();
+
+  if (isCurrentProcessInNetworkNamespace()) {
+    return execFileSync(cmd, args, {
+      cwd: options.cwd,
+      env: options.env,
+      timeout: options.timeout ?? 15000,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
   }
 
   const bwrapArgs = ["--unshare-net", "--dev-bind", "/", "/", cmd, ...args];
   return execFileSync("bwrap", bwrapArgs, {
     cwd: options.cwd,
     env: options.env,
-    timeout: options.timeout ?? 10000,
+    timeout: options.timeout ?? 15000,
     encoding: "utf-8",
     stdio: ["pipe", "pipe", "pipe"],
   });
