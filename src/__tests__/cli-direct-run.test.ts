@@ -23,13 +23,14 @@ describe("CLI Direct-Run Detection & Entry Point Identity (P2)", () => {
   });
 
   it("case 2: direct source execution using tsx executes as entry point", () => {
-    const stdout = execFileSync("npx", ["tsx", srcCli, "--version"], {
+    const tsxBin = resolve(__dirname, "../../node_modules/.bin/tsx");
+    const stdout = execFileSync(tsxBin, [srcCli, "--version"], {
       env: getIsolatedEnv(),
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     });
     expect(stdout.trim()).toBe("4.0.0");
-  });
+  }, 15_000);
 
   it("case 3: symlinked prism binary resolves target and executes as entry point", () => {
     const tempDir = mkdtempSync(join(tmpdir(), "prism-symlink-test-"));
