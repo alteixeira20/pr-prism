@@ -1,10 +1,10 @@
 # PR-Prism v4 — Final Operational Integration Report
 
-**Target Worktree:** `~/Projects/pr-prism-v4-e2e-integration`  
-**Branch:** `feat/v4-e2e-integration`  
-**Baseline Commit:** `2c3429363d2c`  
-**Integration Status:** Complete & Verified (All 73 Test Suites / 1,114 Tests Passing)  
-**Date:** 2026-10-27  
+**Target Worktree:** `~/Projects/pr-prism-v4-e2e-integration`
+**Branch:** `feat/v4-e2e-integration`
+**Baseline Commit:** `2c3429363d2c`
+**Integration Status:** Complete & Verified (All 73 Test Suites / 1,114 Tests Passing)
+**Date:** 2026-10-27
 
 ---
 
@@ -56,7 +56,7 @@ flowchart TD
 
 ### 2.1 Database Configuration & Schema Compatibility
 - **Investigated Schema Compatibility:** Thorough inspection of `baseline/prism-jev-decisions.sqlite` confirmed that its 33-column schema, primary key `(repo, item_type, item_number, model, schema_version)`, and indexes match `JevDecisionStore` (`src/decisions/decision-store.ts`) 100%. No schema migrations or bridging scripts are needed.
-- **Configurable Database Paths:** 
+- **Configurable Database Paths:**
   - Centralized path resolution in `src/cli/shared/paths.ts` now supports explicit CLI flags (`--db`, `--decisions-db`, `--queue-db`) and environment variables (`PRISM_DATA_DIR`, `PRISM_DB_PATH`, `PRISM_DECISIONS_DB_PATH`, `PRISM_QUEUE_DB_PATH`).
   - `getDecisionsDatabasePath` automatically discovers existing databases (`reports/prism-jev-decisions.sqlite`, `data/prism-jev-decisions.sqlite`, or `decisions.db`).
   - `VectorStore` (`src/store.ts`) and `createPipelineContext` (`src/pipeline.ts`) accept explicit database paths, allowing operators to run against fresh isolated workspaces without touching baseline fixtures.
