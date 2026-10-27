@@ -44,7 +44,26 @@ export function computeDecisionFreshness(
   }
 
   const expectedHash = computeItemInputHash(item);
-  return decision.provenance.inputHash === expectedHash ? "fresh" : "stale";
+  if (decision.provenance.inputHash === expectedHash) {
+    return "fresh";
+  }
+
+  // If the item title has changed, the decision is definitely stale
+  if (decision.item?.title && decision.item.title !== item.title) {
+    return "stale";
+  }
+
+  // Fallback: If decision evaluation occurred at or after the item's latest modification,
+  // classify as fresh (supports Jev v2 multi-field input hashes).
+  if (decision.provenance.evaluatedAt && item.updatedAt) {
+    const evaluatedTime = new Date(decision.provenance.evaluatedAt).getTime();
+    const updatedTime = new Date(item.updatedAt).getTime();
+    if (!Number.isNaN(evaluatedTime) && !Number.isNaN(updatedTime)) {
+      return evaluatedTime >= updatedTime ? "fresh" : "stale";
+    }
+  }
+
+  return "stale";
 }
 
 /**

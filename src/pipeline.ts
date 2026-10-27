@@ -52,7 +52,10 @@ export function resolveRepos(repoOverride?: string): string[] {
 
 // ── pipeline functions (used by individual commands and triage) ──
 
-export async function createPipelineContext(repoOverride?: string): Promise<PipelineContext> {
+export async function createPipelineContext(
+  repoOverride?: string,
+  options?: { dbPath?: string },
+): Promise<PipelineContext> {
   const config = loadConfig();
   const env = loadEnvConfig();
   const repoStr = repoOverride || config.repo || getRepos(config)[0];
@@ -66,7 +69,7 @@ export async function createPipelineContext(repoOverride?: string): Promise<Pipe
     baseUrl: env.EMBEDDING_BASE_URL,
     dimensions: env.EMBEDDING_DIMENSIONS,
   });
-  const store = new VectorStore(undefined, embedder.dimensions, env.EMBEDDING_MODEL, {
+  const store = new VectorStore(options?.dbPath, embedder.dimensions, env.EMBEDDING_MODEL, {
     incidentWindows: config.incidents ?? [],
   });
   return { config, env, owner, repo, repoFull, github, store, embedder };

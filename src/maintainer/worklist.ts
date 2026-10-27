@@ -8,6 +8,7 @@
 
 import type { JevDecisionStore } from "../decisions/decision-store.js";
 import type { JevFirstDecisionRecord } from "../decisions/triage-v2.js";
+import type { DurableReviewQueue } from "../review-queue.js";
 import { scorePR } from "../scorer.js";
 import type { VectorStore } from "../store.js";
 import type { Cluster, PRItem, ScoredPR } from "../types.js";
@@ -36,6 +37,8 @@ export interface WorklistBuildOptions {
   clusters: Cluster[];
   /** Optional JevDecisionStore for Stage A typed decisions. */
   jevStore?: JevDecisionStore;
+  /** Optional DurableReviewQueue for v4 multi-account review checkpoints. */
+  queue?: DurableReviewQueue;
   /** Optional filter criteria. */
   filter?: WorklistFilter;
   /** Optional sort options. */
@@ -543,7 +546,7 @@ export function buildWorklist(options: WorklistBuildOptions): WorklistResult {
     const membership = clusterMap.get(item.number);
     const decision = decisionMap.get(item.number);
     const rawReview = store.getReview(repo, item.number);
-    const reviewResult = getReviewResult(store, repo, item.number);
+    const reviewResult = getReviewResult(store, repo, item.number, options.queue);
     const scoredPR = clusterItemMap.get(item.number);
 
     return buildMaintainerItem({

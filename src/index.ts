@@ -117,6 +117,8 @@ export {
 export { createEmbeddingProvider, prepareEmbeddingText } from "./embeddings.js";
 export { classifyFetchError, classifyHttpError, ProviderError } from "./errors.js";
 export { GitHubClient } from "./github.js";
+export * from "./housekeeping/index.js";
+export * from "./maintainer/index.js";
 export type { PipelineContext } from "./pipeline.js";
 export {
   createPipelineContext,
