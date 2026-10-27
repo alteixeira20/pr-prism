@@ -3,38 +3,54 @@ import { normalizeRestPR } from "../normalization/items.js";
 import type { CIStatus, FetchOptions, GitHubContext } from "../types.js";
 
 export async function fetchPRs(context: GitHubContext, opts: FetchOptions = {}): Promise<PRItem[]> {
-  const { since, state = "open", maxItems = 5000, batchSize = 50, onProgress } = opts;
+  const { since, state = "open", maxItems = 5000, batchSize, onProgress } = opts;
   const items: PRItem[] = [];
   let page = 1;
   const repoFull = `${context.owner}/${context.repo}`;
+  const seenNumbers = new Set<number>();
 
   while (items.length < maxItems) {
+    const remaining = maxItems - items.length;
+    const perPage = Math.min(batchSize ?? 100, remaining, 100);
+
     const response = await context.withBackoff(() =>
       context.octokit.pulls.list({
         owner: context.owner,
         repo: context.repo,
-        state,
+        state: state === "merged" ? "closed" : state,
         sort: "updated",
         direction: "desc",
-        per_page: Math.min(batchSize, 100),
+        per_page: perPage,
         page,
       }),
     );
 
     context.rateLimiter.updateFromHeaders(response.headers as Record<string, string>);
 
-    if (response.data.length === 0) break;
+    if (!response.data || response.data.length === 0) break;
 
     for (const pr of response.data) {
+      if (items.length >= maxItems) break;
+
       if (since && new Date(pr.updated_at) < new Date(since)) {
         onProgress?.(items.length, items.length);
         return items;
       }
 
+      if (state === "merged" && !pr.merged_at) {
+        continue;
+      }
+
+      if (seenNumbers.has(pr.number)) {
+        continue;
+      }
+      seenNumbers.add(pr.number);
+
       items.push(normalizeRestPR(pr, repoFull));
     }
 
     onProgress?.(items.length, maxItems);
+    if (items.length >= maxItems) break;
     page++;
   }
 

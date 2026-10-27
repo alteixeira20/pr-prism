@@ -4,7 +4,7 @@ import type { RateLimiter } from "./rate-limit.js";
 
 export interface FetchOptions {
   since?: string;
-  state?: "open" | "closed" | "all";
+  state?: "open" | "closed" | "merged" | "all";
   maxItems?: number;
   batchSize?: number;
   onProgress?: (fetched: number, total: number) => void;
@@ -17,7 +17,7 @@ export interface GitHubContext {
   readonly repo: string;
   readonly octokit: Octokit;
   readonly rateLimiter: RateLimiter;
-  withBackoff<T>(fn: () => Promise<T>): Promise<T>;
+  withBackoff<T>(fn: (attempt: number) => Promise<T>): Promise<T>;
 }
 
 export interface GitHubWriteContext extends GitHubContext {

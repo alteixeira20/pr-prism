@@ -28,14 +28,23 @@ export class GitHubClient {
   private rateLimiter: RateLimiter;
   private gate: WriteGate;
 
+  private sleepFn?: (ms: number) => Promise<void>;
+
   // gate defaults to dry-run: a GitHubClient never mutates the repo unless a
   // caller explicitly hands it an "apply" gate. This is the read-only ethos.
-  constructor(token: string, owner: string, repo: string, gate: WriteGate = createWriteGate("dry-run")) {
+  constructor(
+    token: string,
+    owner: string,
+    repo: string,
+    gate: WriteGate = createWriteGate("dry-run"),
+    sleepFn?: (ms: number) => Promise<void>,
+  ) {
     this.octokit = new Octokit({ auth: token });
     this.owner = owner;
     this.repo = repo;
     this.gate = gate;
     this.rateLimiter = new RateLimiter();
+    this.sleepFn = sleepFn;
   }
 
   getRateLimit(): RateLimitInfo {
@@ -69,8 +78,8 @@ export class GitHubClient {
     };
   }
 
-  async withBackoff<T>(fn: () => Promise<T>): Promise<T> {
-    return withRetryBackoff(fn, () => this.rateLimiter.get());
+  async withBackoff<T>(fn: (attempt: number) => Promise<T>): Promise<T> {
+    return withRetryBackoff(fn, () => this.rateLimiter.get(), this.sleepFn);
   }
 
   // ── GraphQL methods ───────────────────────────────────────────
