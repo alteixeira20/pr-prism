@@ -1,7 +1,12 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { computeCredentialFingerprint } from "./decisions/triage-v2.js";
 import { classifyFetchError, classifyHttpError } from "./errors.js";
+import { DEFAULT_FEATHERLESS_TIERS, type ReviewTier, resolveTierFromModelId } from "./review/model-registry.js";
+import { ReviewValidationError, validateReviewResult } from "./review/validation-error.js";
 import type { ClaimedReviewJob, DurableReviewQueue } from "./review-queue.js";
+
+export { ReviewValidationError, validateReviewResult };
 
 export const MAX_PROVIDER_ACCOUNTS = 5;
 
@@ -18,6 +23,14 @@ export interface ReviewAccountProfile {
   enabled?: boolean;
   consecutive429Limit?: number;
   cooldownBaseMs?: number;
+  /** Which tier this account/model is assigned to */
+  tier?: ReviewTier;
+  /** Override for max concurrent requests (default comes from tier config) */
+  maxConcurrent?: number;
+  /** Override for GLM-5.3 reasoning effort */
+  reasoningEffort?: "low" | "high";
+  /** Override for max output tokens */
+  outputTokens?: number;
 }
 
 export interface ClassifiedError {
@@ -57,6 +70,14 @@ export interface ReviewSchedulerOptions {
   maxConsecutive429?: number;
   pollIntervalMs?: number;
   drainWhenEmpty?: boolean;
+  /** Hard cap on the number of completed LLM calls. Safety gate for smoke tests. */
+  maxJobs?: number;
+  /** Global cap on total in-flight jobs across all accounts (default: unlimited) */
+  maxActiveJobs?: number;
+  /** Job filter: only process jobs matching this item type */
+  filterItemType?: "pr" | "issue";
+  /** Job filter: only process items where payload.isOpen === true */
+  filterOpenOnly?: boolean;
   workerFn?: (
     job: ClaimedReviewJob,
     profile: ReviewAccountProfile,
@@ -67,6 +88,8 @@ export interface ReviewSchedulerOptions {
     promptTokens?: number;
     completionTokens?: number;
     latencyMs?: number;
+    finishReason?: string | null;
+    recordedModelId?: string | null;
   }>;
 }
 
@@ -218,8 +241,8 @@ export function loadMultiAccountProfilesFromEnv(env: NodeJS.ProcessEnv = process
  * - auth_failed: 401 or 403 upgrade_required (disables account, retryable on other accounts)
  * - credit_exhausted: 402 or quota exceeded (disables account, retryable on other accounts)
  * - rate_limited: 429 (backs off exponential cooldown)
- * - request_rejected: 400 or 422 or schema failure (marks job rejected_permanent, NEVER retried!)
- * - transient_error: 5xx, network timeouts (retryable up to max attempts)
+ * - request_rejected: 400 or 422 HTTP provider rejection (marks job rejected_permanent, NEVER retried!)
+ * - transient_error: 5xx, network timeouts, or model output validation issues (retryable up to max attempts)
  */
 export function classifyProviderError(err: unknown): ClassifiedError {
   const anyErr = err as any;
@@ -239,19 +262,34 @@ export function classifyProviderError(err: unknown): ClassifiedError {
   const lowerMsg = rawMessage.toLowerCase();
   const name = anyErr?.name || "";
 
-  // 1. Request rejected: Bad Request / Unprocessable / Validation -> NEVER retry across accounts!
+  // 0. Model output validation failures are transient (retryable), NEVER permanent provider rejections!
+  if (err instanceof ReviewValidationError) {
+    return {
+      kind: "transient_error",
+      errorCode: `MODEL_${err.kind.toUpperCase()}`,
+      message: err.message,
+      retryableOnOtherAccount: true,
+      disableAccount: false,
+    };
+  }
+
+  if (name === "ZodError" && !status) {
+    return {
+      kind: "transient_error",
+      errorCode: "MODEL_SCHEMA_MISMATCH",
+      message: rawMessage,
+      retryableOnOtherAccount: true,
+      disableAccount: false,
+    };
+  }
+
+  // 1. Request rejected: Bad Request / Unprocessable / Content Policy from provider endpoint -> NEVER retry across accounts!
   if (
     status === 400 ||
     status === 422 ||
-    name === "ZodError" ||
-    lowerMsg.includes("bad request") ||
-    lowerMsg.includes("unprocessable") ||
-    lowerMsg.includes("schema validation") ||
-    lowerMsg.includes("validation error") ||
-    lowerMsg.includes("invalid prompt") ||
-    lowerMsg.includes("request_rejected") ||
     lowerMsg.includes("content policy") ||
-    lowerMsg.includes("invalid argument")
+    lowerMsg.includes("content_filter") ||
+    lowerMsg.includes("safety_check")
   ) {
     return {
       kind: "request_rejected",
@@ -496,13 +534,14 @@ export async function verifyAccountsIndependently(
 /**
  * Multi-Provider Review Scheduler.
  *
- * Runs up to 1 concurrent worker loop per configured active account (max 5 accounts).
- * Enforces the Hard Concurrency Invariant:
- *   - Each account has exactly 1 worker loop.
- *   - `inFlightByAccount` for each account never exceeds 1.
- *   - `maxObservedInFlightByAccount` tracks runtime proof for testing.
- *   - Automatically halts failing accounts on auth/credit issues without cycling.
- *   - Exponential backoff on HTTP 429 rate limits.
+ * Runs concurrent worker loops across configured active accounts (max 5 accounts).
+ * Enforces tier-based concurrency and capacity limits:
+ *   - LIGHT: up to 2 concurrent requests per account (1 concurrency unit per request).
+ *   - INTERMEDIATE: up to 2 concurrent requests per account (2 concurrency units per request).
+ *   - COMPLEX: max 1 concurrent request per account, strictly exclusive (never overlaps on same account).
+ *   - Configurable global active job cap (--max-active-jobs).
+ *   - Bounded execution safety gate (--max-jobs N) preventing runaway paid batches.
+ *   - Output validation at final scheduler persistence boundary.
  */
 export class MultiProviderReviewScheduler {
   private queue: DurableReviewQueue;
@@ -514,6 +553,10 @@ export class MultiProviderReviewScheduler {
   private maxConsecutive429: number;
   private pollIntervalMs: number;
   private drainWhenEmpty: boolean;
+  public maxJobs?: number;
+  private filterItemType?: "pr" | "issue";
+  private filterOpenOnly?: boolean;
+  private maxActiveJobs?: number;
   private workerFn?: (
     job: ClaimedReviewJob,
     profile: ReviewAccountProfile,
@@ -524,6 +567,8 @@ export class MultiProviderReviewScheduler {
     promptTokens?: number;
     completionTokens?: number;
     latencyMs?: number;
+    finishReason?: string | null;
+    recordedModelId?: string | null;
   }>;
 
   private inFlightByAccount = new Map<string, number>();
@@ -531,8 +576,10 @@ export class MultiProviderReviewScheduler {
   private disabledAccounts = new Set<string>();
   private accountCooldownUntil = new Map<string, number>();
   private consecutive429ByAccount = new Map<string, number>();
+  private concurrencyUnitsPerAccount = new Map<string, number>();
   private stopped = false;
   private abortController = new AbortController();
+  public completedJobCount = 0;
 
   constructor(queue: DurableReviewQueue, profiles: ReviewAccountProfile[], options: ReviewSchedulerOptions = {}) {
     this.maxProviderAccounts = options.maxProviderAccounts ?? MAX_PROVIDER_ACCOUNTS;
@@ -551,12 +598,17 @@ export class MultiProviderReviewScheduler {
     this.pollIntervalMs = options.pollIntervalMs ?? 50;
     this.drainWhenEmpty = options.drainWhenEmpty ?? true;
     this.workerFn = options.workerFn;
+    this.maxJobs = options.maxJobs;
+    this.filterItemType = options.filterItemType;
+    this.filterOpenOnly = options.filterOpenOnly;
+    this.maxActiveJobs = options.maxActiveJobs;
 
     for (const p of this.profiles) {
       this.inFlightByAccount.set(p.accountId, 0);
       this.maxObservedInFlightByAccount.set(p.accountId, 0);
       this.consecutive429ByAccount.set(p.accountId, 0);
       this.accountCooldownUntil.set(p.accountId, 0);
+      this.concurrencyUnitsPerAccount.set(p.accountId, 0);
     }
   }
 
@@ -606,12 +658,24 @@ export class MultiProviderReviewScheduler {
     promptTokens?: number;
     completionTokens?: number;
     latencyMs?: number;
+    finishReason?: string | null;
+    recordedModelId?: string | null;
   }> {
     const baseUrl =
       profile.baseUrl ||
       (profile.provider === "featherless" ? "https://api.featherless.ai/v1" : "https://api.openai.com/v1");
 
     const model = profile.model || (profile.provider === "featherless" ? "zai-org/GLM-5.3-Flash" : "gpt-4o-mini");
+
+    // Tier-aware token limits and reasoning effort
+    const tierConfig = profile.tier ? DEFAULT_FEATHERLESS_TIERS[profile.tier] : null;
+    const resolvedTier = tierConfig?.tier || resolveTierFromModelId(model);
+    const resolvedConfig = resolvedTier ? DEFAULT_FEATHERLESS_TIERS[resolvedTier] : null;
+
+    const maxOutputTokens =
+      profile.outputTokens || resolvedConfig?.maxOutputTokens || (model.includes("GLM-5.3") ? 12_288 : 8_192);
+
+    const reasoningEffort = profile.reasoningEffort || (model.includes("GLM-5.3") ? "low" : undefined);
 
     const payload = typeof job.payload === "string" ? JSON.parse(job.payload) : job.payload;
     const messages = [
@@ -632,18 +696,24 @@ export class MultiProviderReviewScheduler {
       headers.Authorization = `Bearer ${cred.apiKey}`;
     }
 
+    const requestBody: Record<string, unknown> = {
+      model,
+      messages,
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+      max_tokens: maxOutputTokens,
+    };
+    if (reasoningEffort) {
+      requestBody.reasoning_effort = reasoningEffort;
+    }
+
     const start = Date.now();
     let resp: Response;
     try {
       resp = await fetch(`${baseUrl}/chat/completions`, {
         method: "POST",
         headers,
-        body: JSON.stringify({
-          model,
-          messages,
-          temperature: 0.2,
-          response_format: { type: "json_object" },
-        }),
+        body: JSON.stringify(requestBody),
         signal,
       });
     } catch (err: any) {
@@ -659,19 +729,64 @@ export class MultiProviderReviewScheduler {
     }
 
     const data = (await resp.json()) as any;
-    const content = data.choices?.[0]?.message?.content || "{}";
-    let parsed: unknown = {};
+    const choice = data.choices?.[0];
+    if (!choice) {
+      throw new ReviewValidationError(
+        "empty_result",
+        data.model || model,
+        null,
+        0,
+        "No choices returned by LLM provider",
+      );
+    }
+
+    const finishReason = choice.finish_reason || null;
+    const completionTokens = data.usage?.completion_tokens ?? 0;
+    const promptTokens = data.usage?.prompt_tokens ?? 0;
+    const recordedModelId = data.model || model;
+
+    // Check truncation
+    if (finishReason === "length") {
+      throw new ReviewValidationError(
+        "truncated_generation",
+        recordedModelId,
+        finishReason,
+        completionTokens,
+        `Generation truncated at ${completionTokens} completion tokens (finish_reason=length)`,
+      );
+    }
+
+    const content = choice.message?.content;
+    if (!content || !content.trim() || content.trim() === "{}") {
+      throw new ReviewValidationError(
+        "empty_result",
+        recordedModelId,
+        finishReason,
+        completionTokens,
+        "LLM returned empty completion or empty object {}",
+      );
+    }
+
+    let parsed: unknown;
     try {
       parsed = JSON.parse(content);
-    } catch {
-      parsed = { rawContent: content };
+    } catch (parseErr: any) {
+      throw new ReviewValidationError(
+        "malformed_json",
+        recordedModelId,
+        finishReason,
+        completionTokens,
+        `Failed to parse model JSON: ${parseErr?.message}`,
+      );
     }
 
     return {
       result: parsed,
-      promptTokens: data.usage?.prompt_tokens ?? 0,
-      completionTokens: data.usage?.completion_tokens ?? 0,
+      promptTokens,
+      completionTokens,
       latencyMs,
+      finishReason,
+      recordedModelId,
     };
   }
 
@@ -679,10 +794,26 @@ export class MultiProviderReviewScheduler {
     profile: ReviewAccountProfile,
     cred: { apiKey: string; keyFingerprint: string },
     signal?: AbortSignal,
+    maxConcurrent: number = 1,
   ): Promise<void> {
     const accountId = profile.accountId;
 
     while (!this.stopped && !signal?.aborted && !this.disabledAccounts.has(accountId)) {
+      // 0. Safety gate: check if maxJobs cap has been reached
+      if (this.maxJobs !== undefined && this.maxJobs > 0 && this.completedJobCount >= this.maxJobs) {
+        this.stop();
+        break;
+      }
+
+      // 0b. Global active job cap check
+      if (this.maxActiveJobs !== undefined && this.maxActiveJobs > 0) {
+        const totalInFlight = Array.from(this.inFlightByAccount.values()).reduce((a, b) => a + b, 0);
+        if (totalInFlight >= this.maxActiveJobs) {
+          await this.sleep(this.pollIntervalMs, signal);
+          continue;
+        }
+      }
+
       // 1. Check cooldown
       const cooldownUntil = this.accountCooldownUntil.get(accountId) || 0;
       const now = Date.now();
@@ -707,11 +838,49 @@ export class MultiProviderReviewScheduler {
         continue;
       }
 
-      // 3. Concurrency check: enforce HARD CONCURRENCY INVARIANT
+      // 2b. Apply scheduler-level job filters if specified
+      if (this.filterItemType && claimed.itemType !== this.filterItemType) {
+        this.queue.releaseJobOnFailure({
+          jobId: claimed.jobId,
+          accountId,
+          leaseId: claimed.leaseId,
+          provider: profile.provider,
+          model: profile.model,
+          keyFingerprint: cred.keyFingerprint,
+          failureKind: "transient_error",
+          errorMessage: `Filtered out: itemType ${claimed.itemType} does not match filter ${this.filterItemType}`,
+        });
+        await this.sleep(this.pollIntervalMs, signal);
+        continue;
+      }
+
+      if (this.filterOpenOnly && claimed.payload) {
+        try {
+          const parsedPayload = typeof claimed.payload === "string" ? JSON.parse(claimed.payload) : claimed.payload;
+          if (parsedPayload.isOpen === false) {
+            this.queue.releaseJobOnFailure({
+              jobId: claimed.jobId,
+              accountId,
+              leaseId: claimed.leaseId,
+              provider: profile.provider,
+              model: profile.model,
+              keyFingerprint: cred.keyFingerprint,
+              failureKind: "transient_error",
+              errorMessage: "Filtered out: item is closed",
+            });
+            await this.sleep(this.pollIntervalMs, signal);
+            continue;
+          }
+        } catch {
+          // ignore payload parse error
+        }
+      }
+
+      // 3. Concurrency check: enforce concurrency limits
       const currentInFlight = (this.inFlightByAccount.get(accountId) || 0) + 1;
-      if (currentInFlight > 1) {
+      if (currentInFlight > maxConcurrent) {
         throw new Error(
-          `CRITICAL INVARIANT VIOLATION: Account ${accountId} has ${currentInFlight} in-flight operations (max allowed is 1)!`,
+          `CRITICAL INVARIANT VIOLATION: Account ${accountId} has ${currentInFlight} in-flight operations (max allowed is ${maxConcurrent})!`,
         );
       }
       this.inFlightByAccount.set(accountId, currentInFlight);
@@ -734,6 +903,8 @@ export class MultiProviderReviewScheduler {
           promptTokens?: number;
           completionTokens?: number;
           latencyMs?: number;
+          finishReason?: string | null;
+          recordedModelId?: string | null;
         };
 
         if (this.workerFn) {
@@ -749,6 +920,41 @@ export class MultiProviderReviewScheduler {
         const latencyMs = Date.now() - startMs;
         this.consecutive429ByAccount.set(accountId, 0);
 
+        // Strict review output validation at persistence boundary
+        const validation = validateReviewResult(
+          execResult.result,
+          claimed.itemType,
+          execResult.finishReason ?? null,
+          execResult.recordedModelId ?? profile.model,
+          execResult.completionTokens ?? 0,
+          { requireSummary: !this.workerFn },
+        );
+
+        if (!validation.valid) {
+          throw validation.error;
+        }
+
+        // Compute fingerprints for audit provenance
+        const promptFingerprint = createHash("sha256")
+          .update(typeof claimed.payload === "string" ? claimed.payload : JSON.stringify(claimed.payload))
+          .digest("hex")
+          .slice(0, 16);
+        const responseFingerprint = createHash("sha256")
+          .update(typeof execResult.result === "string" ? execResult.result : JSON.stringify(execResult.result))
+          .digest("hex")
+          .slice(0, 16);
+
+        // Evaluate evidence completeness
+        let evidenceCompleteness: "full" | "partial" | "minimal" = "full";
+        if (claimed.itemType === "pr") {
+          const payloadObj = typeof claimed.payload === "string" ? JSON.parse(claimed.payload) : claimed.payload;
+          if (!payloadObj?.diffText && !payloadObj?.diff) {
+            evidenceCompleteness = "minimal";
+          } else if (payloadObj?.truncatedDiff || payloadObj?.truncatedBody) {
+            evidenceCompleteness = "partial";
+          }
+        }
+
         this.queue.completeJobWithCheckpoint({
           jobId: claimed.jobId,
           accountId,
@@ -760,7 +966,18 @@ export class MultiProviderReviewScheduler {
           promptTokens: execResult.promptTokens ?? 0,
           completionTokens: execResult.completionTokens ?? 0,
           latencyMs: execResult.latencyMs ?? latencyMs,
+          finish_reason: execResult.finishReason ?? "stop",
+          recorded_model_id: execResult.recordedModelId ?? profile.model,
+          prompt_fingerprint: promptFingerprint,
+          response_fingerprint: responseFingerprint,
+          evidence_completeness: evidenceCompleteness,
         });
+
+        this.completedJobCount++;
+        if (this.maxJobs !== undefined && this.maxJobs > 0 && this.completedJobCount >= this.maxJobs) {
+          this.stop();
+          break;
+        }
       } catch (err: any) {
         if (heartbeatTimer) {
           clearInterval(heartbeatTimer);
@@ -799,7 +1016,8 @@ export class MultiProviderReviewScheduler {
         if (heartbeatTimer) {
           clearInterval(heartbeatTimer);
         }
-        this.inFlightByAccount.set(accountId, 0);
+        const updatedInFlight = Math.max(0, (this.inFlightByAccount.get(accountId) || 1) - 1);
+        this.inFlightByAccount.set(accountId, updatedInFlight);
       }
     }
   }
@@ -851,9 +1069,17 @@ export class MultiProviderReviewScheduler {
     }
 
     if (activeProfilesWithCreds.length > 0) {
-      const workerPromises = activeProfilesWithCreds.map((entry) =>
-        this.runWorkerForAccount(entry.profile, entry.cred, linkedController.signal),
-      );
+      const workerPromises: Promise<void>[] = [];
+      for (const entry of activeProfilesWithCreds) {
+        const tierConfig = entry.profile.tier ? DEFAULT_FEATHERLESS_TIERS[entry.profile.tier] : null;
+        const maxConcurrent = entry.profile.maxConcurrent ?? tierConfig?.maxConcurrentPerAccount ?? 1;
+        // Default concurrency invariant: each account runs 1 worker loop by default
+        for (let i = 0; i < maxConcurrent; i++) {
+          workerPromises.push(
+            this.runWorkerForAccount(entry.profile, entry.cred, linkedController.signal, maxConcurrent),
+          );
+        }
+      }
       await Promise.all(workerPromises);
     }
 

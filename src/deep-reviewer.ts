@@ -72,7 +72,7 @@ You must respond with valid JSON matching this exact schema:
 }`;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Untrusted Evidence Wrapping & Boundary Defusing
+// Untrusted Evidence Wrapping, Boundary Defusing & Secret Redaction
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface WrappedUntrustedEvidence {
@@ -82,15 +82,37 @@ export interface WrappedUntrustedEvidence {
   includedLength: number;
 }
 
+const SENSITIVE_CREDENTIAL_PATTERNS = [
+  /Bearer\s+([A-Za-z0-9_\-.]{10,})/gi,
+  /(gh[pousr]_[A-Za-z0-9_]{20,})/g,
+  /(typesafe_[A-Za-z0-9_]{16,})/gi,
+  /(sk-[A-Za-z0-9_-]{20,})/g,
+  /((?:AKIA|ABIA|ACCA|ASIA)[A-Z0-9]{16})/g,
+  /(-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/g,
+];
+
+/**
+ * Redacts common credential and API secret patterns from diff and body text
+ * to prevent transmitting sensitive tokens to external LLM providers.
+ */
+export function redactSecretsFromText(text: string): string {
+  let result = text;
+  for (const pattern of SENSITIVE_CREDENTIAL_PATTERNS) {
+    result = result.replace(pattern, "[REDACTED_SECRET]");
+  }
+  return result;
+}
+
 /**
  * Wraps untrusted GitHub evidence inside `<UNTRUSTED_GITHUB_DATA label="...">` boundaries.
- * Defuses any embedded closing tags to eliminate parser escape attempts and enforces
- * character limits with strict metadata accounting.
+ * Defuses any embedded closing tags to eliminate parser escape attempts, redacts secrets,
+ * and enforces character limits with strict metadata accounting.
  */
 export function wrapUntrustedGitHubEvidence(
   label: string,
   content: string | undefined | null,
   maxChars: number,
+  redactSecrets = true,
 ): WrappedUntrustedEvidence {
   const raw = content ?? "";
   const originalLength = raw.length;
@@ -98,8 +120,14 @@ export function wrapUntrustedGitHubEvidence(
   const includedLength = truncated ? maxChars : originalLength;
   const sliced = raw.slice(0, includedLength);
 
+  // Redact credentials discovered in diff/body before emitting to model
+  const sanitized = redactSecrets ? redactSecretsFromText(sliced) : sliced;
+
   // Defuse closing tags to stop tag-breakout prompt injection
-  const defused = sliced.replace(/<\s*\/\s*UNTRUSTED_GITHUB_DATA[^>]*>/gi, "[DEFUSED_TAG: </UNTRUSTED_GITHUB_DATA>]");
+  const defused = sanitized.replace(
+    /<\s*\/\s*UNTRUSTED_GITHUB_DATA[^>]*>/gi,
+    "[DEFUSED_TAG: </UNTRUSTED_GITHUB_DATA>]",
+  );
 
   const cleanLabel = label.replace(/[^\w-]/g, "_");
   const wrapped = `<UNTRUSTED_GITHUB_DATA label="${cleanLabel}">\n${defused}\n</UNTRUSTED_GITHUB_DATA>`;
@@ -759,24 +787,47 @@ export interface LLMConfig {
   apiKey?: string;
   model: string;
   baseUrl?: string;
+  maxOutputTokens?: number;
+  reasoningEffort?: "low" | "high";
 }
 
 class OpenAILLM implements LLMProvider {
   private apiKey: string;
   private model: string;
   private baseUrl: string;
+  private maxOutputTokens?: number;
+  private reasoningEffort?: "low" | "high";
 
   constructor(config: LLMConfig) {
     if (!config.apiKey) throw new Error("LLM_API_KEY required");
     this.apiKey = config.apiKey;
     this.model = config.model;
     this.baseUrl = normalizeHttpBaseUrl(config.baseUrl || "https://api.openai.com/v1");
+    this.maxOutputTokens = config.maxOutputTokens;
+    this.reasoningEffort = config.reasoningEffort;
+  }
+
+  private resolveOutputTokenLimit(): number {
+    if (this.maxOutputTokens) return this.maxOutputTokens;
+    if (this.model.includes("GLM-5.3")) return 12_288;
+    return 8_192;
   }
 
   async complete(prompt: string, systemPrompt?: string): Promise<string> {
     const messages: any[] = [];
     if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
     messages.push({ role: "user", content: prompt });
+
+    const maxTokens = this.resolveOutputTokenLimit();
+    const body: Record<string, unknown> = {
+      model: this.model,
+      messages,
+      temperature: 0.2,
+      max_tokens: maxTokens,
+    };
+    if (this.reasoningEffort || this.model.includes("GLM-5.3")) {
+      body.reasoning_effort = this.reasoningEffort || "low";
+    }
 
     let resp: Response;
     try {
@@ -786,14 +837,14 @@ class OpenAILLM implements LLMProvider {
           "Content-Type": "application/json",
           Authorization: `Bearer ${this.apiKey}`,
         },
-        body: JSON.stringify({ model: this.model, messages, temperature: 0.2 }),
+        body: JSON.stringify(body),
       });
     } catch (error) {
       throw classifyFetchError("LLM", error, { apiKeyEnvVar: "LLM_API_KEY", secrets: [this.apiKey] });
     }
     if (!resp.ok) {
-      const body = await resp.text();
-      throw classifyHttpError("LLM", resp.status, body, {
+      const bodyText = await resp.text();
+      throw classifyHttpError("LLM", resp.status, bodyText, {
         apiKeyEnvVar: "LLM_API_KEY",
         secrets: [this.apiKey],
       });
@@ -802,7 +853,15 @@ class OpenAILLM implements LLMProvider {
     if (!data.choices?.length) {
       throw new ProviderError("LLM", "Empty response from model (no choices returned)", "Retry with a different model");
     }
-    return data.choices[0].message.content;
+    const choice = data.choices[0];
+    if (choice.finish_reason === "length") {
+      throw new ProviderError(
+        "LLM",
+        "Generation truncated at token limit (finish_reason=length)",
+        "Increase token budget",
+      );
+    }
+    return choice.message.content;
   }
 
   async completeJSON<T>(prompt: string, systemPrompt?: string): Promise<T> {
@@ -810,6 +869,18 @@ class OpenAILLM implements LLMProvider {
     if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
     messages.push({ role: "user", content: prompt });
 
+    const maxTokens = this.resolveOutputTokenLimit();
+    const body: Record<string, unknown> = {
+      model: this.model,
+      messages,
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+      max_tokens: maxTokens,
+    };
+    if (this.reasoningEffort || this.model.includes("GLM-5.3")) {
+      body.reasoning_effort = this.reasoningEffort || "low";
+    }
+
     let resp: Response;
     try {
       resp = await fetch(`${this.baseUrl}/chat/completions`, {
@@ -818,19 +889,14 @@ class OpenAILLM implements LLMProvider {
           "Content-Type": "application/json",
           Authorization: `Bearer ${this.apiKey}`,
         },
-        body: JSON.stringify({
-          model: this.model,
-          messages,
-          temperature: 0.2,
-          response_format: { type: "json_object" },
-        }),
+        body: JSON.stringify(body),
       });
     } catch (error) {
       throw classifyFetchError("LLM", error, { apiKeyEnvVar: "LLM_API_KEY", secrets: [this.apiKey] });
     }
     if (!resp.ok) {
-      const body = await resp.text();
-      throw classifyHttpError("LLM", resp.status, body, {
+      const bodyText = await resp.text();
+      throw classifyHttpError("LLM", resp.status, bodyText, {
         apiKeyEnvVar: "LLM_API_KEY",
         secrets: [this.apiKey],
       });
@@ -839,24 +905,35 @@ class OpenAILLM implements LLMProvider {
     if (!data.choices?.length) {
       throw new ProviderError("LLM", "Empty response from model (no choices returned)", "Retry with a different model");
     }
-    return JSON.parse(data.choices[0].message.content);
+    const choice = data.choices[0];
+    if (choice.finish_reason === "length") {
+      throw new ProviderError(
+        "LLM",
+        "Generation truncated at token limit (finish_reason=length)",
+        "Increase token budget",
+      );
+    }
+    return JSON.parse(choice.message.content);
   }
 }
 
 class AnthropicLLM implements LLMProvider {
   private apiKey: string;
   private model: string;
+  private maxOutputTokens?: number;
 
   constructor(config: LLMConfig) {
     if (!config.apiKey) throw new Error("LLM_API_KEY required for Anthropic");
     this.apiKey = config.apiKey;
     this.model = config.model;
+    this.maxOutputTokens = config.maxOutputTokens;
   }
 
   async complete(prompt: string, systemPrompt?: string): Promise<string> {
+    const maxTokens = this.maxOutputTokens || 8_192;
     const body: any = {
       model: this.model,
-      max_tokens: 4096,
+      max_tokens: maxTokens,
       messages: [{ role: "user", content: prompt }],
     };
     if (systemPrompt) body.system = systemPrompt;
