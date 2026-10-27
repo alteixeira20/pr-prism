@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
 
-export type ReviewJobStatus = "queued" | "claimed" | "completed" | "failed" | "rejected_permanent";
+export type ReviewJobStatus = "queued" | "claimed" | "completed" | "failed" | "rejected_permanent" | "invalid";
 export type ReviewPriorityBand = "P0_CRITICAL" | "P1_HIGH" | "P2_MODERATE" | "P3_ROUTINE_LOCAL";
 export type ReviewItemType = "pr" | "issue";
 export type LedgerStatus =
@@ -58,6 +58,18 @@ export interface CompleteReviewJobParams {
   completionTokens?: number;
   latencyMs?: number;
   nowMs?: number;
+  /** Actual finish_reason from the model API response (e.g. "stop", "length") */
+  finish_reason?: string | null;
+  /** The model ID as reported by the API (may differ from the configured model) */
+  recorded_model_id?: string | null;
+  /** SHA-256 prefix of the result JSON for deduplication and provenance */
+  response_fingerprint?: string | null;
+  /** SHA-256 prefix of the prompt sent to the model */
+  prompt_fingerprint?: string | null;
+  /** Completeness assessment of the evidence provided to the model */
+  evidence_completeness?: "full" | "partial" | "minimal" | null;
+  /** If true, record the job status as "invalid" instead of "completed" */
+  markInvalid?: boolean;
 }
 
 export interface ReleaseReviewJobFailureParams {
@@ -115,6 +127,18 @@ export interface ReviewCheckpointRecord {
   completion_tokens: number | null;
   latency_ms: number | null;
   completed_at: string;
+  /** Status of the checkpoint: "completed" (valid) or "invalid" (failed validation) */
+  checkpoint_status: string | null;
+  /** Finish reason from the model API (e.g. "stop", "length") */
+  finish_reason: string | null;
+  /** Model ID as reported by the API */
+  recorded_model_id: string | null;
+  /** SHA-256 prefix of the result JSON */
+  response_fingerprint: string | null;
+  /** SHA-256 prefix of the prompt sent */
+  prompt_fingerprint: string | null;
+  /** Completeness of evidence provided to the model */
+  evidence_completeness: string | null;
 }
 
 export interface AccountUsageLedgerRecord {
@@ -139,6 +163,7 @@ export interface QueueStats {
   completed: number;
   failed: number;
   rejected_permanent: number;
+  invalid: number;
   total: number;
 }
 
@@ -231,7 +256,13 @@ export class DurableReviewQueue {
         prompt_tokens INTEGER,
         completion_tokens INTEGER,
         latency_ms INTEGER,
-        completed_at TEXT NOT NULL
+        completed_at TEXT NOT NULL,
+        checkpoint_status TEXT,
+        finish_reason TEXT,
+        recorded_model_id TEXT,
+        response_fingerprint TEXT,
+        prompt_fingerprint TEXT,
+        evidence_completeness TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_review_checkpoints_lookup
@@ -256,6 +287,24 @@ export class DurableReviewQueue {
       CREATE INDEX IF NOT EXISTS idx_account_usage_ledger_account
         ON account_usage_ledger(account_id, recorded_at);
     `);
+
+    // Migration guard: ensure columns exist if opening an older database
+    const checkpointCols = new Set(
+      (this.db.pragma("table_info(review_checkpoints)") as Array<{ name: string }>).map((c) => c.name),
+    );
+    const newCheckpointCols: Array<[string, string]> = [
+      ["checkpoint_status", "TEXT"],
+      ["finish_reason", "TEXT"],
+      ["recorded_model_id", "TEXT"],
+      ["response_fingerprint", "TEXT"],
+      ["prompt_fingerprint", "TEXT"],
+      ["evidence_completeness", "TEXT"],
+    ];
+    for (const [col, colType] of newCheckpointCols) {
+      if (!checkpointCols.has(col)) {
+        this.db.exec(`ALTER TABLE review_checkpoints ADD COLUMN ${col} ${colType}`);
+      }
+    }
   }
 
   private runImmediate<T>(fn: () => T): T {
@@ -281,9 +330,17 @@ export class DurableReviewQueue {
 
       const existingCheckpoint = this.db
         .prepare("SELECT * FROM review_checkpoints WHERE checkpoint_key = ?")
-        .get(checkpointKey);
+        .get(checkpointKey) as ReviewCheckpointRecord | undefined;
 
-      if (existingCheckpoint) {
+      const isCheckpointValid = Boolean(
+        existingCheckpoint &&
+          existingCheckpoint.checkpoint_status !== "invalid" &&
+          existingCheckpoint.result_json &&
+          existingCheckpoint.result_json !== "{}" &&
+          !existingCheckpoint.result_json.includes('"rawContent":'),
+      );
+
+      if (isCheckpointValid) {
         const existingJob = this.db.prepare("SELECT * FROM review_jobs WHERE job_id = ?").get(jobId) as
           | ReviewJobRecord
           | undefined;
@@ -458,14 +515,24 @@ export class DurableReviewQueue {
 
       for (const candidate of candidates) {
         const checkpointKey = `${candidate.repo}:${candidate.item_type}:${candidate.item_number}:${candidate.input_fingerprint}:${candidate.prompt_schema_version}`;
-        const cp = this.db.prepare("SELECT * FROM review_checkpoints WHERE checkpoint_key = ?").get(checkpointKey);
+        const cp = this.db.prepare("SELECT * FROM review_checkpoints WHERE checkpoint_key = ?").get(checkpointKey) as
+          | ReviewCheckpointRecord
+          | undefined;
 
         if (cp) {
-          const isoNow = new Date(nowMs).toISOString();
-          this.db
-            .prepare("UPDATE review_jobs SET status = 'completed', updated_at = ? WHERE job_id = ?")
-            .run(isoNow, candidate.job_id);
-          continue;
+          const isCpValid =
+            cp.checkpoint_status !== "invalid" &&
+            cp.result_json &&
+            cp.result_json !== "{}" &&
+            !cp.result_json.includes('"rawContent":');
+
+          if (isCpValid) {
+            const isoNow = new Date(nowMs).toISOString();
+            this.db
+              .prepare("UPDATE review_jobs SET status = 'completed', updated_at = ? WHERE job_id = ?")
+              .run(isoNow, candidate.job_id);
+            continue;
+          }
         }
 
         // Claim candidate atomically
@@ -635,6 +702,10 @@ export class DurableReviewQueue {
    * Complete a claimed job with a review checkpoint.
    * Atomically records the checkpoint, completes the job, releases the lease,
    * and logs success into the usage ledger.
+   *
+   * If `params.markInvalid` is true, the job status is set to "invalid" instead
+   * of "completed" — used for jobs where the HTTP call succeeded but the result
+   * failed post-hoc validation.
    */
   public completeJobWithCheckpoint(params: CompleteReviewJobParams): void {
     this.runImmediate(() => {
@@ -651,14 +722,18 @@ export class DurableReviewQueue {
 
       const checkpointKey = `${job.repo}:${job.item_type}:${job.item_number}:${job.input_fingerprint}:${job.prompt_schema_version}`;
       const resultJson = typeof params.result === "string" ? params.result : JSON.stringify(params.result);
+      const finalJobStatus = params.markInvalid ? "invalid" : "completed";
+      const checkpointStatus = params.markInvalid ? "invalid" : "completed";
 
       this.db
         .prepare(`
           INSERT OR REPLACE INTO review_checkpoints (
             checkpoint_key, job_id, repo, item_type, item_number, input_fingerprint,
             prompt_schema_version, account_id, provider, model, result_json,
-            prompt_tokens, completion_tokens, latency_ms, completed_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            prompt_tokens, completion_tokens, latency_ms, completed_at,
+            checkpoint_status, finish_reason, recorded_model_id, response_fingerprint,
+            prompt_fingerprint, evidence_completeness
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `)
         .run(
           checkpointKey,
@@ -676,15 +751,21 @@ export class DurableReviewQueue {
           params.completionTokens ?? null,
           params.latencyMs ?? null,
           isoNow,
+          checkpointStatus,
+          params.finish_reason ?? null,
+          params.recorded_model_id ?? null,
+          params.response_fingerprint ?? null,
+          params.prompt_fingerprint ?? null,
+          params.evidence_completeness ?? null,
         );
 
       this.db
         .prepare(`
           UPDATE review_jobs
-          SET status = 'completed', claimed_by_account = NULL, lease_id = NULL, lease_expires_at = NULL, updated_at = ?
+          SET status = ?, claimed_by_account = NULL, lease_id = NULL, lease_expires_at = NULL, updated_at = ?
           WHERE job_id = ?
         `)
-        .run(isoNow, job.job_id);
+        .run(finalJobStatus, isoNow, job.job_id);
 
       this.db.prepare("DELETE FROM account_leases WHERE account_id = ?").run(params.accountId);
 
@@ -839,6 +920,73 @@ export class DurableReviewQueue {
   }
 
   /**
+   * List jobs filtered by item type and/or status array.
+   * Used by --prs-only, --issues-only, and filter flags in the CLI.
+   */
+  public listJobsByFilter(filter: {
+    itemType?: "pr" | "issue";
+    status?: ReviewJobStatus[];
+    isOpen?: boolean;
+  }): ReviewJobRecord[] {
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+
+    if (filter.itemType) {
+      conditions.push("item_type = ?");
+      params.push(filter.itemType);
+    }
+
+    if (filter.status && filter.status.length > 0) {
+      const placeholders = filter.status.map(() => "?").join(", ");
+      conditions.push(`status IN (${placeholders})`);
+      for (const s of filter.status) {
+        params.push(s);
+      }
+    }
+
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(`SELECT * FROM review_jobs ${where} ORDER BY priority_score DESC, item_number ASC`)
+      .all(...params) as ReviewJobRecord[];
+
+    // Apply isOpen filter on payload JSON if requested
+    if (filter.isOpen !== undefined) {
+      return rows.filter((row) => {
+        try {
+          const payload = JSON.parse(row.payload_json);
+          return payload.isOpen === filter.isOpen;
+        } catch {
+          return false;
+        }
+      });
+    }
+
+    return rows;
+  }
+
+  /**
+   * List recent failed jobs (last N by updated_at).
+   */
+  public listRecentFailures(limit: number = 5): ReviewJobRecord[] {
+    return this.db
+      .prepare(
+        "SELECT * FROM review_jobs WHERE status IN ('failed', 'rejected_permanent') ORDER BY updated_at DESC LIMIT ?",
+      )
+      .all(limit) as ReviewJobRecord[];
+  }
+
+  /**
+   * List active (unexpired) leases.
+   */
+  public listActiveLeases(
+    nowMs: number = Date.now(),
+  ): Array<{ account_id: string; job_id: string; expires_at: number }> {
+    return this.db
+      .prepare("SELECT account_id, job_id, expires_at FROM account_leases WHERE expires_at > ?")
+      .all(nowMs) as Array<{ account_id: string; job_id: string; expires_at: number }>;
+  }
+
+  /**
    * Get queue counts grouped by status.
    */
   public getQueueStats(): QueueStats {
@@ -853,6 +1001,7 @@ export class DurableReviewQueue {
       completed: 0,
       failed: 0,
       rejected_permanent: 0,
+      invalid: 0,
       total: 0,
     };
 
@@ -929,5 +1078,47 @@ export class DurableReviewQueue {
    */
   public close(): void {
     this.db.close();
+  }
+
+  /**
+   * Quarantine specific smoke-test checkpoints/jobs by marking them as "invalid".
+   * Used to retroactively mark known-bad historical results (e.g. rawContent placeholders,
+   * empty JSON completions) without affecting other jobs.
+   *
+   * @param smokeTestJobIds - Job IDs to mark as invalid
+   * @returns Number of jobs successfully quarantined
+   */
+  public quarantineSmokeTestCheckpoints(smokeTestJobIds: string[]): number {
+    return this.runImmediate(() => {
+      let count = 0;
+      const isoNow = new Date().toISOString();
+
+      for (const jobId of smokeTestJobIds) {
+        const job = this.db.prepare("SELECT * FROM review_jobs WHERE job_id = ?").get(jobId) as
+          | ReviewJobRecord
+          | undefined;
+
+        if (!job) {
+          continue;
+        }
+
+        // Mark the job as invalid
+        const result = this.db
+          .prepare("UPDATE review_jobs SET status = 'invalid', updated_at = ? WHERE job_id = ?")
+          .run(isoNow, jobId);
+
+        if (result.changes > 0) {
+          count++;
+        }
+
+        // Mark the associated checkpoint as invalid (if it exists)
+        const checkpointKey = `${job.repo}:${job.item_type}:${job.item_number}:${job.input_fingerprint}:${job.prompt_schema_version}`;
+        this.db
+          .prepare("UPDATE review_checkpoints SET checkpoint_status = 'invalid' WHERE checkpoint_key = ?")
+          .run(checkpointKey);
+      }
+
+      return count;
+    });
   }
 }
