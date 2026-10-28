@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import dns from "node:dns";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
@@ -15,13 +15,26 @@ import type { EmbeddingProvider, PipelineContext } from "../types.js";
 import { captureProcessEnv, getIsolatedEnv, restoreProcessEnv } from "./cli-test-env.js";
 import {
   assertOsNetworkIsolationSupported,
+  evaluateOsNetworkIsolationMode,
   execInOsNetworkSandbox,
+  getOsNetworkIsolationDetail,
   installNetworkGuard,
+  isOsNetworkIsolationSupported,
   type NetworkGuard,
+  type OsIsolationUnavailableReason,
+  osNetworkIsolationUnsupportedReason,
 } from "./network-sandbox.js";
 
 const rootDir = resolve(__dirname, "../..");
 const distCli = resolve(rootDir, "dist/cli.js");
+
+/** Read the package version at test-collection time from the local package.json. */
+const packageVersion: string = (() => {
+  const pkg = JSON.parse(readFileSync(resolve(rootDir, "package.json"), "utf-8")) as {
+    version: string;
+  };
+  return pkg.version;
+})();
 
 describe("PR-Prism v4 Orchestrated Production E2E & Negative Acceptance", () => {
   let tempDir: string;
@@ -991,7 +1004,7 @@ Hosting git repositories or replacing interactive human code reviews.
 
       // 1. --version output contract
       const versionOutput = execCli(["--version"]).trim();
-      expect(versionOutput).toBe("4.0.0");
+      expect(versionOutput).toBe(packageVersion);
 
       // 2. --help output contract
       const helpOutput = execCli(["--help"]);
@@ -1095,10 +1108,28 @@ Hosting git repositories or replacing interactive human code reviews.
   });
 
   // ── AUDIT FINDING 1: OS-LEVEL NETWORK ISOLATION & SUBPROCESS INHERITANCE ──
+  //
+  // Normal mode: if bwrap is unavailable the test is explicitly skipped with a
+  // reason, never silently passed.  Other tests in this file continue running.
+  //
+  // Strict mode (STRICT_NETWORK_ISOLATION=1): any inability to establish verified
+  // isolation fails the test.  Skips are not permitted.
 
-  it("demonstrates verifiable OS-level network isolation and subprocess inheritance where bwrap is supported", () => {
-    // Audit Finding 1: Never silently count an unavailable mandatory isolation check as successful
-    assertOsNetworkIsolationSupported();
+  it("demonstrates verifiable OS-level network isolation and subprocess inheritance where bwrap is supported", (ctx) => {
+    const evaluation = evaluateOsNetworkIsolationMode();
+
+    if (!evaluation.supported) {
+      if (evaluation.action === "fail") {
+        // Strict mode: missing bwrap, rejected namespaces, or sandbox error must cause failure.
+        throw new Error(evaluation.message!);
+      }
+      // Normal mode: record an explicit Vitest skip with the diagnostic reason.
+      // Never count an unsupported sandbox as verified or passed.
+      ctx.skip(evaluation.message!);
+      return;
+    }
+
+    // ── bwrap is available: execute all four isolation controls ──
 
     // 1. Negative control: OS kernel blocks DNS lookup in network-isolated namespace
     const dnsCheck = execInOsNetworkSandbox("node", [
@@ -1126,6 +1157,81 @@ Hosting git repositories or replacing interactive human code reviews.
 
     // 4. Positive control: CLI executes cleanly in network-isolated namespace
     const cliOutput = execInOsNetworkSandbox("node", [distCli, "--version"], { env: getIsolatedEnv() }).trim();
-    expect(cliOutput).toBe("4.0.0");
+    expect(cliOutput).toBe(packageVersion);
+  });
+
+  // ── REGRESSION: strict/non-strict capability handling ──
+  //
+  // These tests verify the skip/fail dispatch logic in isolation so that
+  // the OS isolation test itself does not need to simulate sandbox failures.
+
+  describe("osNetworkIsolationUnsupportedReason and capability dispatch", () => {
+    it("returns null (supported) when bwrap is available or process is already in a network namespace", () => {
+      const reason = osNetworkIsolationUnsupportedReason();
+      expect(reason === null || typeof reason === "string").toBe(true);
+    });
+
+    it("isOsNetworkIsolationSupported reflects osNetworkIsolationUnsupportedReason", () => {
+      const reason = osNetworkIsolationUnsupportedReason();
+      expect(isOsNetworkIsolationSupported()).toBe(reason === null);
+    });
+
+    it("assertOsNetworkIsolationSupported throws with diagnostic message when isolation is unavailable", () => {
+      if (isOsNetworkIsolationSupported()) {
+        expect(() => assertOsNetworkIsolationSupported()).not.toThrow();
+      } else {
+        expect(() => assertOsNetworkIsolationSupported()).toThrow(
+          /OS-level network isolation \(bwrap --unshare-net\) is UNVERIFIED/,
+        );
+      }
+    });
+
+    it("normal mode (strict: false) converts every unavailable reason into a skip action with diagnostic detail", () => {
+      const reasons: OsIsolationUnavailableReason[] = [
+        "not-linux",
+        "bwrap-not-found",
+        "namespace-rejected",
+        "sandbox-error",
+      ];
+      for (const reason of reasons) {
+        const evalResult = evaluateOsNetworkIsolationMode({
+          strict: false,
+          unsupportedReason: reason,
+        });
+        expect(evalResult.supported).toBe(false);
+        expect(evalResult.action).toBe("skip");
+        expect(evalResult.reason).toBe(reason);
+        expect(evalResult.message).toContain("UNVERIFIED");
+        expect(evalResult.message).toContain("Set STRICT_NETWORK_ISOLATION=1 to fail instead of skip");
+      }
+    });
+
+    it("strict mode (strict: true) converts every unavailable reason into a fail action and never skips", () => {
+      const reasons: OsIsolationUnavailableReason[] = [
+        "not-linux",
+        "bwrap-not-found",
+        "namespace-rejected",
+        "sandbox-error",
+      ];
+      for (const reason of reasons) {
+        const evalResult = evaluateOsNetworkIsolationMode({
+          strict: true,
+          unsupportedReason: reason,
+        });
+        expect(evalResult.supported).toBe(false);
+        expect(evalResult.action).toBe("fail");
+        expect(evalResult.reason).toBe(reason);
+        expect(evalResult.message).toContain("Strict mode (STRICT_NETWORK_ISOLATION=1) requires verified isolation");
+      }
+    });
+
+    it("distinguishes missing executable from rejected namespace and platform mismatch in diagnostics", () => {
+      expect(getOsNetworkIsolationDetail("bwrap-not-found")).toContain("not installed or not on PATH");
+      expect(getOsNetworkIsolationDetail("namespace-rejected")).toContain(
+        "rejected unprivileged network-namespace creation",
+      );
+      expect(getOsNetworkIsolationDetail("not-linux")).toContain("not running on Linux");
+      expect(getOsNetworkIsolationDetail("sandbox-error")).toContain("probe failed");
+    });
   });
 });

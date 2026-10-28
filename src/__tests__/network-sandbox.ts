@@ -204,23 +204,114 @@ export function isCurrentProcessInNetworkNamespace(): boolean {
 }
 
 /**
+ * Describes why OS-level network isolation is unavailable on the current host,
+ * or returns null if isolation is available.
+ *
+ * Distinguishes:
+ *  - "not-linux": running on a non-Linux platform
+ *  - "bwrap-not-found": bwrap executable is not installed or not on PATH
+ *  - "namespace-rejected": bwrap is present but the kernel rejected unprivileged
+ *    user-namespace / network-namespace creation (e.g. security policy other than AppArmor)
+ *  - "sandbox-error": bwrap probe failed for another reason (signal, timeout, etc.)
+ *  - null: isolation is available (bwrap works, or already inside an isolated namespace)
+ */
+export type OsIsolationUnavailableReason = "not-linux" | "bwrap-not-found" | "namespace-rejected" | "sandbox-error";
+
+export function osNetworkIsolationUnsupportedReason(): OsIsolationUnavailableReason | null {
+  if (process.platform !== "linux") return "not-linux";
+  if (isCurrentProcessInNetworkNamespace()) return null;
+  try {
+    const result = spawnSync("bwrap", ["--unshare-net", "--dev-bind", "/", "/", "true"], {
+      stdio: "pipe",
+      timeout: 2000,
+    });
+    if (result.status === 0) return null;
+    if (result.error) {
+      // ENOENT means bwrap is not installed / not on PATH
+      if ((result.error as NodeJS.ErrnoException).code === "ENOENT") return "bwrap-not-found";
+      return "sandbox-error";
+    }
+    // Non-zero exit — kernel or security policy rejected namespace creation
+    return "namespace-rejected";
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return "bwrap-not-found";
+    return "sandbox-error";
+  }
+}
+
+/**
+ * Returns human-readable diagnostic detail for a given isolation failure reason.
+ */
+export function getOsNetworkIsolationDetail(reason: OsIsolationUnavailableReason): string {
+  const detail: Record<OsIsolationUnavailableReason, string> = {
+    "not-linux": "not running on Linux",
+    "bwrap-not-found": "bwrap is not installed or not on PATH",
+    "namespace-rejected": "kernel or security policy rejected unprivileged network-namespace creation",
+    "sandbox-error": "bwrap probe failed (signal, timeout, or unexpected error)",
+  };
+  return detail[reason];
+}
+
+/**
+ * Evaluates the OS network isolation capability against the requested mode (normal vs strict).
+ *
+ * Normal mode: if isolation is unavailable, returns action: "skip" with diagnostic reason.
+ * Strict mode (STRICT_NETWORK_ISOLATION=1): returns action: "fail". Never converts to skip.
+ */
+export interface OsIsolationEvaluation {
+  supported: boolean;
+  reason: OsIsolationUnavailableReason | null;
+  detail: string | null;
+  action: "proceed" | "skip" | "fail";
+  message: string | null;
+}
+
+export function evaluateOsNetworkIsolationMode(options?: {
+  strict?: boolean;
+  unsupportedReason?: OsIsolationUnavailableReason | null;
+}): OsIsolationEvaluation {
+  const reason =
+    options?.unsupportedReason !== undefined ? options.unsupportedReason : osNetworkIsolationUnsupportedReason();
+
+  if (reason === null) {
+    return {
+      supported: true,
+      reason: null,
+      detail: null,
+      action: "proceed",
+      message: null,
+    };
+  }
+
+  const detail = getOsNetworkIsolationDetail(reason);
+  const strict = options?.strict ?? process.env.STRICT_NETWORK_ISOLATION === "1";
+  const message = `OS-level network isolation (bwrap --unshare-net) is UNVERIFIED on this host: ${detail}.`;
+
+  if (strict) {
+    return {
+      supported: false,
+      reason,
+      detail,
+      action: "fail",
+      message: `${message} Strict mode (STRICT_NETWORK_ISOLATION=1) requires verified isolation.`,
+    };
+  }
+
+  return {
+    supported: false,
+    reason,
+    detail,
+    action: "skip",
+    message: `${message} Set STRICT_NETWORK_ISOLATION=1 to fail instead of skip.`,
+  };
+}
+
+/**
  * Checks whether Linux bubblewrap (bwrap) or an active isolated network namespace
  * is available with unshare-net support.
  */
 export function isOsNetworkIsolationSupported(): boolean {
-  if (process.platform !== "linux") return false;
-  // If the current process is already inside a kernel-isolated network namespace,
-  // OS-level isolation is verified and active.
-  if (isCurrentProcessInNetworkNamespace()) return true;
-  try {
-    const result = spawnSync("bwrap", ["--unshare-net", "--dev-bind", "/", "/", "true"], {
-      stdio: "ignore",
-      timeout: 2000,
-    });
-    return result.status === 0;
-  } catch {
-    return false;
-  }
+  return osNetworkIsolationUnsupportedReason() === null;
 }
 
 /**
@@ -229,11 +320,10 @@ export function isOsNetworkIsolationSupported(): boolean {
  * silently counted as verified.
  */
 export function assertOsNetworkIsolationSupported(): void {
-  if (!isOsNetworkIsolationSupported()) {
-    throw new Error(
-      "OS-level network isolation (bwrap --unshare-net) is UNVERIFIED on this host. " +
-        "Host kernel lacks unprivileged user namespace / bwrap support.",
-    );
+  const reason = osNetworkIsolationUnsupportedReason();
+  if (reason !== null) {
+    const detail = getOsNetworkIsolationDetail(reason);
+    throw new Error(`OS-level network isolation (bwrap --unshare-net) is UNVERIFIED on this host: ${detail}.`);
   }
 }
 
