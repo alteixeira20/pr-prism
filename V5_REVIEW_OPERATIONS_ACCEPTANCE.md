@@ -20,7 +20,23 @@ Dirty source provenance: four modified files (`src/cli/commands/review.ts`, `src
 
 ## Verification
 
-Validation results and tested implementation commit are recorded below after final checks. Only fixed fake GitHub/model payloads are used. No credentials or source payloads enter version control.
+Tested implementation commit: `11823c121840fee693426c825c338c6ac776d704`. Runtime: Node `v24.22.0`, npm `11.19.1`, Linux. Final source checks on 2026-10-28:
+
+| Command/gate | Actual result |
+| --- | --- |
+| `npm run build` | PASS, exit 0 |
+| `npm run lint` | PASS, exit 0, 196 files checked |
+| `npm run typecheck` | PASS, exit 0, CLI and server TypeScript projects |
+| `npm test` | PASS, 74 files, 1,150 tests, zero failures |
+| `npm run ci` | PASS, exit 0; includes all checks above plus compiled version/help |
+| New V5 tests | 36 tests pass, included in full suite |
+| `npm pack --dry-run --json --ignore-scripts` | PASS, 389 packaged files; native operations JS/declarations/maps and V5 documents included |
+| Clean tarball install | PASS, local tarball in a fresh `mkdtemp` npm project, exit 0 |
+| Installed CLI smoke | PASS: version 4.0.0, review help, issue JSON status reports `not_initialized` without creating state |
+| `git diff --check` | PASS |
+| `bwrap` network-denial negative control | PASS: failed external fetch prints `NETWORK_DENIED`, exit 0 |
+
+Full final CI ran inside `bwrap --unshare-net` with `/` mounted read-only, only the isolated worktree and `/tmp` writable, and a sanitized environment with disposable HOME/cache/data directory. Validation logs and package artifacts are retained outside Git in a disposable validation directory. The first clean package smoke also completed before the acceptance-results documentation update; the final tarball was repacked and smoke-tested after it. Node 22 was not available/validated. Only fixed fake GitHub/model payloads are used; no credentials or source payloads enter version control.
 
 The first isolated CI run exposed two inherited test issues: the baseline test attempted a writable constructor against operator state, blocked by the read-only mount; the reset test inherited a shared test database override. Both were fixed. Subsequent regression CI passed. External filesystem paths were read-only under `bwrap`; network was disabled and credentials removed. The standalone OS denial negative control returned `NETWORK_DENIED` with exit 0; this is actual Linux namespace isolation, not merely bwrap executable discovery.
 
