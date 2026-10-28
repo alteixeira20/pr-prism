@@ -221,35 +221,17 @@ The source V5 branch/worktree remains clean at the expected SHA. Other worktrees
 branches, fork main and production artifacts were not changed. Odysseus was not inspected, stopped,
 restarted or migrated. No push, PR creation, release, npm publication or paid request occurred.
 
-## Subsequent manual commands — do not execute without later authorization
+## Historical publication instructions (superseded on 2026-10-28)
 
-These commands assume the named promotion path does not exist and main is not checked out elsewhere.
-They guard both remote ancestry and the tested runtime parent. Stop on any failed guard. They are
-instructions for the operator; none was executed during acceptance.
+The original acceptance report included a one-time fork-main promotion script using
+the old `e606690b` baseline and proposing a new upstream pull request. Those
+commands are obsolete and must not be rerun: the fork was already promoted by
+non-force fast-forward and the upstream contribution is tracked as
+[PR #32](https://github.com/StressTestor/pr-prism/pull/32), using the retained
+`harden/v5-upstream-ready-2026-10-28` feature branch as its head.
 
-```sh
-cd /home/alteixeira20/Projects/pr-prism-v5-upstream-ready
-candidate=$(git rev-parse harden/v5-upstream-ready-2026-10-28)
-test "$(git rev-parse "$candidate^")" = bb3014a58a295e02b36499681de3d0dc4e8bd850
-test "$(git diff --name-only bb3014a58a295e02b36499681de3d0dc4e8bd850 "$candidate")" = V5_UPSTREAM_READY_ACCEPTANCE.md
-test -z "$(git status --porcelain)"
-git fetch --no-write-fetch-head upstream main
-git fetch --no-write-fetch-head origin main
-test "$(git rev-parse upstream/main)" = 12c8ef11d2cf4cb1e0ed79200cf5b44ee0a70e3c
-test "$(git rev-parse origin/main)" = e606690b7aa8e3f8a1304a72ce8c0dd43bb56a0c
-test "$(git rev-parse main)" = e606690b7aa8e3f8a1304a72ce8c0dd43bb56a0c
-git merge-base --is-ancestor upstream/main "$candidate"
-git merge-base --is-ancestor main "$candidate"
-test ! -e /home/alteixeira20/Projects/pr-prism-v5-main-promotion
-git worktree add /home/alteixeira20/Projects/pr-prism-v5-main-promotion main
-git -C /home/alteixeira20/Projects/pr-prism-v5-main-promotion merge --ff-only "$candidate"
-# Separate later authorization for remote changes:
-test "$(git ls-remote origin refs/heads/main | cut -f1)" = e606690b7aa8e3f8a1304a72ce8c0dd43bb56a0c
-git push origin refs/heads/main:refs/heads/main
-gh pr create --repo StressTestor/pr-prism --base main --head alteixeira20:main \
-  --title 'Add V4 maintainer workflows and V5 durable review operations' \
-  --body-file V5_UPSTREAM_READY_ACCEPTANCE.md
-```
+The preceding acceptance and test tables describe the original pre-publication
+checkpoint. Later remediation and actual GitHub CI are recorded below.
 
 ## Post-audit CI remediation addendum (2026-10-28)
 
@@ -286,12 +268,12 @@ remediations, and validation evidence without modifying the historical acceptanc
      - Supported environment: Executes all four isolation controls (DNS lookup denial, RFC 5737
        TCP `ENETUNREACH`, child subprocess namespace inheritance, and isolated CLI `--version`).
      - Dynamic version assertion: Replaced hardcoded `"4.0.0"` with local `package.json` version read.
-     - Added 3 focused capability handling regression tests, bringing total test count to 1,203.
+     - Added 3 focused capability handling regression tests, bringing the intermediate test count to 1,203; subsequent regression coverage brought the final suite to 1,206.
    - `.github/workflows/ci.yml`:
      - Set `strategy.fail-fast: false`.
      - Matrix restricted to supported `[22.x, 24.x]` (Node 20.x removed from release gating).
      - Added explicit `npm run typecheck` step before `npm test`.
-     - Added dedicated `linux-sandbox-verification` job on `ubuntu-latest` with bubblewrap
+     - Added dedicated `linux-sandbox-verification` job on `ubuntu-22.04` with bubblewrap
        provisioned via package manager, executing the isolation test under `STRICT_NETWORK_ISOLATION=1`.
    - `CONTRIBUTING.md`:
      - Updated minimum Node requirement from `>=20` to `>=22`.
@@ -306,7 +288,7 @@ remediations, and validation evidence without modifying the historical acceptanc
      - `npm run build`: PASS, exit 0.
      - `npm run lint`: PASS, exit 0 (201 files checked, 0 errors).
      - `npm run typecheck`: PASS, exit 0 (`tsc --noEmit` and server tsconfig).
-     - `npm test`: 78 test files passed (1,203 tests passed, 0 failed, 0 skipped).
+     - `npm test`: 78 test files passed (1,206 tests passed, 0 failed, 0 skipped) in the final Node 24 acceptance.
      - `STRICT_NETWORK_ISOLATION=1 npx vitest run src/__tests__/orchestrated-e2e.test.ts`: PASS, 17/17 passed.
      - `npm run ci`: PASS, exit 0.
      - `npm pack --dry-run --json`: 389 entries packaged, 0 internal markdown files packaged.
@@ -326,3 +308,27 @@ remediations, and validation evidence without modifying the historical acceptanc
    - No live provider or live GitHub workload verification is performed or claimed.
    - No remote exactly-once execution is claimed.
    - Node >=22 compatibility contract is enforced and documented.
+
+## Published contribution and final remote CI checkpoint (2026-10-28)
+
+- Fork `alteixeira20/pr-prism:main` and retained
+  `alteixeira20/pr-prism:harden/v5-upstream-ready-2026-10-28` were both at
+  `1c03f1e618d8db9827298d40ca150ea444fcea7a` before this documentation-only update.
+  This was a non-force fast-forward. Upstream `StressTestor/pr-prism:main` was
+  `12c8ef11d2cf4cb1e0ed79200cf5b44ee0a70e3c`.
+- The last tested implementation commit was
+  `1c03f1e618d8db9827298d40ca150ea444fcea7a`. Its
+  [fork CI run 40778048570](https://github.com/alteixeira20/pr-prism/actions/runs/40778048570)
+  completed successfully: build (22.x), build (24.x), and
+  linux-sandbox-verification all succeeded. Both regular runners recorded
+  **1,205 passed and 1 explicitly skipped**; the strict Ubuntu 22.04 sandbox
+  job recorded **17 passed, 0 skipped**, including all four real isolation controls.
+- [Upstream draft PR #32](https://github.com/StressTestor/pr-prism/pull/32)
+  was opened from the retained feature branch targeting upstream `main`.
+  [Upstream PR CI run 40784119407](https://github.com/StressTestor/pr-prism/actions/runs/40784119407)
+  completed successfully for the pre-documentation-fix head.
+- This final documentation correction does not alter runtime, tests, dependencies,
+  or CI configuration. Its new commit and subsequent CI results must be verified
+  separately before the PR is marked ready for review.
+- No npm publish, release tag, upstream merge, production paid inference, or
+  production maintainer-data mutation occurred as part of this publication workflow.
