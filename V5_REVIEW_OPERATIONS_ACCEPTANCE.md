@@ -1,62 +1,106 @@
 # V5 review operations acceptance
 
-**Verdict: NO-GO for merging into the fork's future V5 main.** This branch is a native development preview with deterministic offline execution proof. Passing tests do not establish completion of the entire requested V5 scope.
+**GO for integration into fork `main`.** All P0 gates below have executable evidence beyond unit tests: source-backed compiled CLI fixtures, actual SIGKILL recovery, competing processes, clean package installations and installed native CLI execution. This is an integration decision, not authorization to merge, push, publish, import production data or take GitHub actions.
 
-## Source provenance
+## Exact source and provenance
 
-Selected ref: `fix/v4-overnight-repair`, maintained source base `6155452402e4270700c3a86d6585e24e4c8aa247`. That commit includes the merged V4 review engine, housekeeping, maintainer workflow, CLI/GitHub modularization and E2E integration. It is also the committed tip of `feat/pr-prism-v4-modernization`; `integrate/pr-prism-v4-modernization` is an older source branch. Fork main remained `e606690b7aa8e3f8a1304a72ce8c0dd43bb56a0c`; cached upstream main remained `12c8ef11d2cf4cb1e0ed79200cf5b44ee0a70e3c`. No fetch/integration was performed.
+- Existing branch: `feat/v5-review-operations`; existing worktree: `~/Projects/pr-prism-v5-review-operations`. No additional branch or worktree was created.
+- Previous verified commit: `4fff3c2f77022b3e49736c1ed00f0f1c2f377a76`.
+- Final implementation commit: **`89312b9f4c5734c75a28acef287ae669e9b3a26c`**. Full runtime CI and clean installation tests below ran against this commit. The following acceptance-report commit changes documentation only; the implementation SHA identifies the exact tested code without a self-referential Git hash.
+- Main implementation commit: `cc8eeaf350ad98d8ce4e68bf8d13ecda6d1462e4`; final implementation commit indexes item reconciliation after a loaded Node 20 run exposed unnecessary whole-queue reads.
+- Maintained V4 base remains `6155452402e4270700c3a86d6585e24e4c8aa247`. Original source stays on `fix/v4-overnight-repair` with its dirty overnight repairs preserved. Those repairs were backed up during the previous phase and were not applied wholesale or modified in this phase.
+- Fork main remains `e606690b7aa8e3f8a1304a72ce8c0dd43bb56a0c`; cached upstream main remains `12c8ef11d2cf4cb1e0ed79200cf5b44ee0a70e3c`. Neither was fetched, merged or pushed.
 
-Local branch: `feat/v5-review-operations`. Isolated worktree: `~/Projects/pr-prism-v5-review-operations`. Existing path and branch were checked absent before creation. Original worktree remains on `fix/v4-overnight-repair`, preserving all dirty changes.
+## PASS/FAIL matrix
 
-Dirty source provenance: four modified files (`src/cli/commands/review.ts`, `src/review-queue.ts`, `src/review-scheduler.ts`, `src/review/model-registry.ts`) and two untracked source/test files (`src/github/pr-evidence.ts`, `src/__tests__/overnight-gate-tests.test.ts`) were exported to a separate private state backup before worktree creation. They remain uncommitted in the original worktree. Their changes include evidence hydration, queue filters, attempt accounting, exports, validation and provider-specific model/benchmark settings. V5 reimplements the operations behavior in separate modules; the dirty patch was deliberately not applied wholesale, including its provider benchmark configuration. Operator `overnight/` data was neither copied into this branch nor modified.
+| Gate | Node 20.20.2 | Node 22.23.4 | Evidence |
+| --- | --- | --- | --- |
+| P0: source/diff integrity | PASS | PASS | Pinned merge-base/head trees and verified Git blob hashes; complete unique file inventory and per-file source/patch manifest |
+| P0: incomplete evidence fails closed | PASS | PASS | Missing/count-mismatched files, truncated trees, corrupt blobs, binary and submodule fixtures never complete current |
+| P0: incremental reconciliation | PASS | PASS | Overlapping cursor, bounded updated feed, failed-cursor retention, periodic full scan and conversation deletion probes |
+| P0: concurrent maintainer changes | PASS | PASS | Closed/merged, head/base/body/comment changes before dispatch, between batches and after the final batch; linked-fix merge remains advisory |
+| P0: crash recovery and uncertain requests | PASS | PASS | Eleven actual SIGKILL boundaries; unresolved requests retain their charge and block automatic retry/account reuse |
+| P0: concurrent budget/ownership | PASS | PASS | Three competing OS processes with distinct or identical accounts; shared budget, fencing and atomic reservations |
+| P0: checkpoint compatibility | PASS | PASS | Schema-5 backup and migration retain exact checkpoint hashes and ledger counts; interrupted committed checkpoints are reused |
+| P1: status/dashboard | PASS | PASS | Shared read-only WAL snapshot, active batch/account, budgets, throughput/ETA, current/missing/stale/partial/failed counts; no inspection requests |
+| `npm run build` | PASS, exit 0 | PASS, exit 0 | Executed by repository CI |
+| `npm run lint` | PASS, exit 0 | PASS, exit 0 | 200 source files checked |
+| `npm run typecheck` | PASS, exit 0 | PASS, exit 0 | CLI and server TypeScript projects |
+| `npm test` | PASS | PASS | **77 files, 1,188 tests, zero failures on each runtime** |
+| `npm run ci` | PASS, exit 0 | PASS, exit 0 | Full checks plus compiled version/help |
+| `npm pack --dry-run --json` | PASS, exit 0 | PASS, exit 0 | 392 files; native operations JS/types/maps and V5 documents included |
+| Clean tarball `npm install` | PASS, exit 0 | PASS, exit 0 | Fresh isolated npm project and ABI-matched native SQLite build on each runtime |
+| Installed CLI version/help/issue JSON status | PASS, exit 0 | PASS, exit 0 | No pre-existing operator state or credentials |
+| Installed CLI offline backlog/recovery fixture | PASS, exit 0 | PASS, exit 0 | Dry-run: 0 paid calls; complete verified PR: 2 fake calls; inspection/recovery: 0 remote calls; resume: 0 extra paid calls |
+| Kernel network-denial negative control | PASS | PASS | Direct socket to numeric IP fails with kernel `ENETUNREACH` inside the isolated network namespace |
+| `git diff --check` | PASS | PASS | No whitespace errors |
 
-## Changes
+Additional regression gate: Node **24.22.0** also passes full `npm run ci`, 77 files / 1,188 tests / exit 0. Node 20/22 binaries were downloaded into disposable storage from the official Node distribution and verified against its SHA-256 manifest. Node 20.20.2 archive checksum: `df770b2a6f130ed8627c9782c988fda9669fa23898329a61a871e32f965e007d`; Node 22.23.4: `1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce`. No global runtime or installed release was changed.
 
-- New `src/review-operations/contracts.ts`, `store.ts`, `github.ts`, `runner.ts`, `cli.ts` implement typed evidence/batches, dedicated SQLite queue/ledger, GET-only GitHub reconciliation, bounded execution and native snapshots/dashboard.
-- `src/cli/commands/review.ts` adds `--all-open`, `--operations-db`, `--max-new-calls`, `--run-id`, `--output-dir`, `--dashboard`, `--refresh`, and routes V5 `--status`; legacy explicit `--queue-db --status` remains supported. `--type`, `--dry-run`, `--resume`, `--json` apply to the new route. Ambiguous single-item and legacy execution flag combinations are rejected.
-- New `src/__tests__/review-operations-v5.test.ts` exercises inventories, races, budgets, checkpoints, fake compiled CLI execution and terminal shutdown.
-- Existing `cli-behavior.test.ts` now isolates reset path environment variables and awaits its async command. Existing `v4-e2e-integration.test.ts` replaces a dangerous hard-coded live-baseline writable constructor with an explicit disposable SQLite read-only negative control and sentinel. Store, cluster and metadata regression fixtures use `mkdtemp` before cleanup.
-- README, design and offline import plan describe local usage and limitations. Package files include the V5 documents. Embedding benchmark implementation is unchanged.
+Implementation tarballs were byte-identical across Node 20/22 builds: SHA-256 `f7ca3d9a01bc71acd780d87c10ba6d65d9bcc158a255c3dfe3a75b129b4d9e09`, 392 files. This hash identifies the tested implementation archive before this documentation-only acceptance update; final package metadata is captured separately after the update. Content checks exclude source tests, SQLite databases, logs, real `.env`, raw operator data and credentials.
 
-## Verification
+## Verification method and reproducibility
 
-Tested implementation commit: `11823c121840fee693426c825c338c6ac776d704`. Runtime: Node `v24.22.0`, npm `11.19.1`, Linux. Final source checks on 2026-10-28:
+All CI tests ran with network access disabled and a sanitized environment. Linux `bwrap` mounted `/` read-only, with only this development worktree and disposable temporary directories writable. Each runtime used its own compiled native SQLite binding, mounted over the dependency only inside its sandbox. The original checkout, production databases and installed release were outside writable mounts. Dependency installation downloaded public packages in separate disposable npm projects; application tests and installed CLI fixtures remained offline.
 
-| Command/gate | Actual result |
-| --- | --- |
-| `npm run build` | PASS, exit 0 |
-| `npm run lint` | PASS, exit 0, 196 files checked |
-| `npm run typecheck` | PASS, exit 0, CLI and server TypeScript projects |
-| `npm test` | PASS, 74 files, 1,150 tests, zero failures |
-| `npm run ci` | PASS, exit 0; includes all checks above plus compiled version/help |
-| New V5 tests | 36 tests pass, included in full suite |
-| `npm pack --dry-run --json --ignore-scripts` | PASS, 389 packaged files; native operations JS/declarations/maps and V5 documents included |
-| Clean tarball install | PASS, local tarball in a fresh `mkdtemp` npm project, exit 0 |
-| Installed CLI smoke | PASS: version 4.0.0, review help, issue JSON status reports `not_initialized` without creating state |
-| `git diff --check` | PASS |
-| `bwrap` network-denial negative control | PASS: failed external fetch prints `NETWORK_DENIED`, exit 0 |
+Actual commands inside the selected runtime environment:
 
-Full final CI ran inside `bwrap --unshare-net` with `/` mounted read-only, only the isolated worktree and `/tmp` writable, and a sanitized environment with disposable HOME/cache/data directory. Validation logs and package artifacts are retained outside Git in a disposable validation directory. The first clean package smoke also completed before the acceptance-results documentation update; the final tarball was repacked and smoke-tested after it. Node 22 was not available/validated. Only fixed fake GitHub/model payloads are used; no credentials or source payloads enter version control.
+```sh
+npm run ci
+npm pack --dry-run --json
+npm pack --json --pack-destination DISPOSABLE_PACKAGE_DIRECTORY
+# In a fresh disposable npm project under the same runtime:
+npm install /path/to/local/prism-triage-4.0.0.tgz --no-audit --no-fund
+node node_modules/prism-triage/dist/cli.js --version
+node node_modules/prism-triage/dist/cli.js review --help
+node node_modules/prism-triage/dist/cli.js review --status --repo example/project --type issue --json
+# From the development checkout, with the installed CLI path:
+node scripts/review-operations-package-smoke.mjs /path/to/installed/dist/cli.js
+```
 
-The first isolated CI run exposed two inherited test issues: the baseline test attempted a writable constructor against operator state, blocked by the read-only mount; the reset test inherited a shared test database override. Both were fixed. Subsequent regression CI passed. External filesystem paths were read-only under `bwrap`; network was disabled and credentials removed. The standalone OS denial negative control returned `NETWORK_DENIED` with exit 0; this is actual Linux namespace isolation, not merely bwrap executable discovery.
+The package smoke helper preloads a strict fake GET-only GitHub transport and one fake model endpoint; all unexpected destinations/methods throw. It executes the installed CLI, not an imported mock command. The reviewed PR includes actual checksum-verified fake blobs, tree paths and a complete manifest. It verifies zero dry-run attempts, exactly two charged fake dispatches, current completion, status/dashboard/recovery with zero remote calls, and zero additional calls on resume. All model findings remain unverified.
 
-Compiled CLI fixture proof runs in `mkdtemp` with a preload intercepting every fetch. Unexpected destinations and any GitHub method other than GET throw. It executes inventory dry-run (zero attempts), two bounded fake model calls, a partial coverage export, `--status --json` and non-TTY `--dashboard --json`. Direct TTY shutdown additionally preserves the runner's durable ownership. Existing characterization and integration suites cover review/top/show registration, scan/triage and the unchanged embedding benchmark.
+The installed Node 22 dashboard was additionally executed in a real PTY against a disposable fixture, rendered current/total, budget, checkpoint and sync data, refreshed, and exited on Ctrl+C. Direct native CLI Ctrl+C exit was 0. The sandbox supervisor itself can report exit 1 when it also receives terminal SIGINT; that supervisor result is not used as the native CLI exit gate. Fixture workers/ledger were unchanged. Automated tests cover terminal width/height, N/A throughput, active item/batch/account, distinct bounded/backlog ETA, stale/closed items and simultaneous WAL writer/read-only inspection.
 
-Race simulations include changed head/base/body/comments or merged/closed state before dispatch; merge between batches and immediately after the final batch; issue closed while queued; opened/omitted membership during discovery; reopen with the original evidence identity; concurrent mixed PR/issue claims; three fake workers; account contention across SQLite connections; budget-stop resume; model fingerprint mismatch; expired worker with an uncheckpointed charged reservation. Every confirmed pre-dispatch state change sends zero additional calls; final merge prevents current completion. A 264k-character fixture produces 13 evidence batches including metadata and reconstructs every supplied patch character exactly. Binary/unavailable evidence remains limited. Provider 401/402/403/429, timeout and schema failures are charged once and never automatically retried. Unknown model action fields and unrelated evidence references are rejected.
+Private validation evidence is retained outside Git in a disposable validation directory: `verified-matrix.json`, `ci-final-node-20.log`, `ci-final-node-22.log`, `ci-final-node-24.log`, `install-final-node-20.log`, `install-final-node-22.log`, `fixture-final-node-20.log`, `fixture-final-node-22.log`, runtime package JSON and local tarballs. No raw private responses or live databases are committed.
 
-## Remaining acceptance blockers
+An intermediate Node 20 CI run hit the previous five-second large-inventory fixture deadline during load. The final implementation replaced per-item whole-queue reads with an indexed item query and gave that 1,611-item durable integration fixture an explicit 30-second I/O deadline. Final full suites passed without reducing assertions or skipping tests.
 
-1. Full reconciliation is used on every invocation. Overlapping incremental windows, periodic full reconciliation scheduling and economical conditional freshness fetches are not implemented. An inventory that consistently omits the same remote item on both enumerations cannot be proven complete by this adapter.
-2. REST patches cannot prove complete raw changed-file coverage. Actual PR reviews remain partial; issues also retain explicit conversation/link verification limitations. A source-backed raw diff adapter, hunk-aware context budgeting and stronger semantic source-line validation are needed before full-coverage claims. Exact character offsets and supplied text coverage are implemented.
-3. Events are preserved and approvals do not universally skip reviews, but repository review-rule policy, precise external issue-resolution classification and complete CI/check-suite/protection semantics need additional adapters and tests. A linked fix is a candidate, never permission to close an issue.
-4. Expired workers pause with retained attempts; explicit audited recovery is not implemented. Cross-process execution is tested through competing database connections and three async workers, not SIGKILL of separate worker processes at every crash boundary. Consistent account IDs across processes are required; aliases for the same provider account are not detected automatically.
-5. Dashboard JSON includes current counts, historical stale jobs, active ownership, account leases, ledger, latest checkpoints, sync/rate observations and reported model timings/spend. TTY presentation is basic. Active evidence batch presentation, event-specific since-scan counters, robust resize tests, batch-complexity ETA ranges and active-run-specific bounded ETA need further work. Costs are absent unless a provider supplies an adapter result; the default compatible provider does not parse proprietary cost fields.
-6. Findings remain unverified claims. Prompt framing is not proof of injection resistance. Future action execution is deliberately absent; current branch cannot verify execution-time CI/protection rules for a nonexistent write path.
-7. Import is a documented offline reversible proposal only; no existing live draft or SQLite import has occurred. Existing V4 draft/maintainer consumers do not automatically consume V5 records.
-8. Node 24 validation is recorded; a Node 22 compatibility run remains required. Model changes do not automatically invalidate already completed jobs during inventory; operator-selected model-specific re-review planning needs an explicit command.
+## P0 evidence details
 
-## Non-mutation and runner observation
+`review-operations-integrity.test.ts` exercises complete before/after source with missing and truncated patches; added empty files; renames; deletions; a 205-file paginated inventory; 264k source characters split into bounded batches and reconstructed exactly; source hash tampering; unavailable/binary/submodule evidence; and head/base/comment movement during collection. Completion requires a validated manifest, every durable batch checkpoint and final authoritative confirmation. Missing API evidence is partial, never complete. Original patch content is preserved and hashed even when verified full sources supply the missing patch context. Immutable object reuse is tested while mutable metadata/conversation remain fresh.
 
-The reference runner source declares version 1.2.0. Process listing observed its bounded `--run-remaining --max-new-calls 80 --continue-on-error` parent and the reference dashboard active before development and after regression testing. These observations are read-only and do not establish backlog completion or current coverage. No live logs, responses or production databases were imported. The attempted inherited baseline write was denied by an OS read-only mount before database configuration could succeed. The test was then removed from all live paths.
+Incremental tests prove cursor overlap, discovery of new items, preservation of stale history, closed/merged/reopened state, head/body/comment changes, failed scan cursor retention, periodic full reconciliation, and competing scan exclusion. Deleted issue comments are detected even when the item's update timestamp and incremental feed do not change. A linked PR merge invalidates waiting issue evidence without closing the issue. Existing maintainer approval is recorded but does not suppress an independent PR-Prism review.
 
-No live operator data, paid providers, installed releases, global npm installation, fork main, upstream or Odysseus GitHub records were mutated. No GitHub write, push, PR, approval, merge, branch deletion or release occurred. Local source commits on this feature branch and disposable validation/package directories are the only intended development writes beyond the private repair backup.
+`review-operations-recovery.test.ts` launches real child processes and kills them with SIGKILL at these eleven boundaries:
+
+1. Claim committed, before reservation.
+2. During the budget-reservation transaction, before commit.
+3. Reservation committed, before dispatch.
+4. Provider simulator observed the request, before a result checkpoint.
+5. During the SQLite checkpoint transaction.
+6. Checkpoint committed, before worker release.
+7. During draft temporary-file publication.
+8. JSON draft linked, before Markdown publication.
+9. Markdown linked, before finalization.
+10. Immediately before completed-state commit.
+11. Completed-state commit, before ownership release.
+
+Uncommitted SQLite changes roll back. A committed reservation without a committed result becomes uncertain; it is never refunded or retried automatically. A known checkpoint is reused without another call after remote revalidation. Orphan drafts say pending final confirmation and cannot establish completion. A three-process test enforces a shared five-attempt cap with distinct accounts and with one shared account. A timeout blocks another job using the same credential alias. Wrong-kind acknowledgement and stale-owner dispatch/completion are rejected. Disposable sentinels and a source-file checksum survive every kill test.
+
+Schema-5 compatibility is verified with a consistent backup, retained exact batch/model identity and unchanged paid counts. Recovery has no provider dependency. Explicit acknowledgement preserves the original uncertain attempt and writes an audit event; a later separately bounded run may reserve another request. **There is no exactly-once paid execution claim.** A provider may have accepted a request whose result was never durably recorded.
+
+## Remaining limitations — non-blocking for this integration scope
+
+- Binary/non-UTF-8/submodule content, inaccessible or API-oversized objects, truncated trees and incomplete remote inventories remain partial and require human/source follow-up. Full text coverage can be completed only when verified pinned source evidence exists.
+- Reconciliation is bounded polling: five-minute cursor overlap and conversation probes, six-hour full membership checks, plus authoritative checks before each dispatch and finalization. GitHub cannot provide a transaction spanning a remote read and local commit; current means current at the recorded final observation.
+- Uncertain remote execution cannot be recovered automatically. Operator acknowledgement authorizes retry planning and possible additional cost; it does not prove the earlier request never reached the provider.
+- ETA ranges are indicative, not statistical confidence intervals. Costs are absent unless reported through a provider adapter. Atomic draft publication requires filesystem hard-link and sync support; failures retain checkpoints and fail closed.
+- Findings and linked-fix/duplicate allegations remain unverified recommendations. Prompt framing is not proof of injection immunity. GitHub write/action execution, branch protection evaluation for future writes, upstream reconciliation, publication and production draft import remain separately gated work, not missing behavior in this read-only operations phase.
+- No production backlog was reviewed or imported in this phase. This GO concerns the implemented source and documented contracts under deterministic API/provider fixtures, real process interruption and runtime/package execution evidence.
+
+## Non-mutation and final state
+
+Only the existing V5 branch was edited/committed. Original dirty source and untracked repairs remain intact. No provider credentials were accessed for development or verification; all application endpoints used fake credentials and fixtures. No paid provider requests, production SQLite mutations, production draft changes, global npm installation changes, fork-main/upstream changes, pushes, branch deletions, GitHub comments/labels/reviews/merges/closes or releases occurred.
+
+Process-only observation near the end found no matching reference Python runner/dashboard. No process was stopped, restarted or modified; no live logs or database contents were inspected. Absence from that process listing does not prove backlog completion or current-head coverage.
