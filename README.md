@@ -409,3 +409,22 @@ see [CONTRIBUTING.md](CONTRIBUTING.md)
 ## license
 
 MIT
+
+### V5 review operations (development preview)
+
+Build locally with Node 22 or newer: `npm ci && npm run build`; invoke `node dist/cli.js` (or install the local package in an isolated project). Native backlog operations require an explicit repository and a separate V5 data directory:
+
+```sh
+export PRISM_DATA_DIR=./review-data
+# GITHUB_TOKEN supplies read-only repository access.
+node dist/cli.js review --all-open --repo example/project --type pr --dry-run --json
+node dist/cli.js review --all-open --repo example/project --type pr --max-new-calls 60 --run-id batch-1
+node dist/cli.js review --dashboard --repo example/project --type pr --refresh 5
+node dist/cli.js review --status --repo example/project --type issue --json
+```
+
+Configure `PRISM_REVIEW_ACCOUNTS` as a JSON array, for example
+`[{"id":"account-a","model":"your-model","endpoint":"https://provider.example/v1/chat/completions","keyEnv":"REVIEW_API_KEY"}]`,
+and supply the corresponding credential through that environment variable. Up to three distinct account IDs share durable attempt accounting. A failed or interrupted outbound attempt consumes budget. Resume with the same `--run-id`, budget and `--resume`; a new run ID authorizes a new bounded budget. Dry-run, status and dashboard dispatch no paid calls. Dry-run does persist its read-only GitHub inventory locally.
+
+Use `--type issue` for the issue evidence contract. Saved findings are unverified recommendations requiring independent source/test confirmation. Operations never post or merge. REST patch coverage limitations are reported as partial. This development preview is not yet approved for fork-main consolidation; see [design](V5_REVIEW_OPERATIONS_DESIGN.md), [acceptance](V5_REVIEW_OPERATIONS_ACCEPTANCE.md) and [offline import plan](V5_REVIEW_OPERATIONS_IMPORT_PLAN.md).

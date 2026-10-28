@@ -1,6 +1,7 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { findDuplicateClusters } from "../cluster.js";
 import { JevDecisionStore } from "../decisions/decision-store.js";
@@ -535,27 +536,22 @@ describe("PR-Prism v4 End-to-End Operational Integration", () => {
     expect(transport.calls.some((c) => c.method === "closeItem")).toBe(false); // Zero GitHub close calls
   });
 
-  it("verifies clean workspace isolation and non-mutation of baseline files", () => {
-    const baselineDir = "/home/alteixeira20/Projects/pr-prism-live/odysseus-v4-e2e/baseline";
-    if (existsSync(baselineDir)) {
-      const baselineJevDb = join(baselineDir, "prism-jev-decisions.sqlite");
-      const baselineReviewDb = join(baselineDir, "prism-glm-review-queue.sqlite");
-
-      if (existsSync(baselineJevDb)) {
-        // Verify read-only query succeeds
-        const readOnlyJev = new JevDecisionStore(baselineJevDb);
-        const decisions = readOnlyJev.getAllDecisions("odysseus-dev/odysseus");
-        expect(decisions.length).toBe(1562);
-        readOnlyJev.close();
-      }
-
-      if (existsSync(baselineReviewDb)) {
-        // Verify canonical 891 queued jobs
-        const readOnlyQueue = new DurableReviewQueue(baselineReviewDb);
-        const jobs = readOnlyQueue.listJobs();
-        expect(jobs.length).toBe(891);
-        readOnlyQueue.close();
-      }
+  it("verifies read-only queries preserve disposable baseline and source sentinels", () => {
+    const baseline = join(tempDir, "baseline.sqlite");
+    const sentinel = join(tempDir, "source-sentinel");
+    const fixture = new Database(baseline);
+    fixture.exec("CREATE TABLE fixture(x TEXT); INSERT INTO fixture VALUES('fake evidence')");
+    fixture.close();
+    writeFileSync(sentinel, "source untouched");
+    const original = readFileSync(baseline);
+    const reader = new Database(baseline, { readonly: true, fileMustExist: true });
+    try {
+      expect(reader.prepare("SELECT x FROM fixture").get()).toEqual({ x: "fake evidence" });
+      expect(() => reader.prepare("DELETE FROM fixture").run()).toThrow();
+    } finally {
+      reader.close();
     }
+    expect(readFileSync(baseline)).toEqual(original);
+    expect(readFileSync(sentinel, "utf8")).toBe("source untouched");
   });
 });

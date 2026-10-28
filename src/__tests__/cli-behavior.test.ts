@@ -412,22 +412,26 @@ describe("CLI Behavior - Markdown Report Formatting Details", () => {
 });
 
 describe("CLI Behavior - Working Directory & Database Path Isolation", () => {
-  it("resolves database relative to custom working directory", () => {
+  it("resolves database relative to custom working directory", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "prism-cwd-test-"));
     try {
       const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
       const prevCwd = process.cwd();
+      const savedEnv = { ...process.env };
 
       try {
+        delete process.env.PRISM_DATA_DIR;
+        delete process.env.PRISM_DB_PATH;
         process.chdir(tempDir);
         const program = new Command();
         registerResetCommand(program);
 
         // When invoked in tempDir, it should check ${tempDir}/data/prism.db
-        program.parse(["node", "prism", "reset", "-y"]);
+        await program.parseAsync(["node", "prism", "reset", "-y"]);
         expect(logSpy).toHaveBeenCalledWith(expect.stringContaining(`No database found at ${tempDir}/data/prism.db`));
       } finally {
         process.chdir(prevCwd);
+        process.env = savedEnv;
         logSpy.mockRestore();
       }
     } finally {

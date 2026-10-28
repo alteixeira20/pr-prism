@@ -6,6 +6,7 @@ import { assertReadOnlyGitHubClient, reviewIssueDeep, reviewPRDeep } from "../..
 import { createEmbeddingProvider } from "../../embeddings.js";
 import { GitHubClient } from "../../github.js";
 import { DEFAULT_FEATHERLESS_TIERS, type ReviewTier, validateModelAvailability } from "../../review/model-registry.js";
+import { operationsCLI } from "../../review-operations/cli.js";
 import { DurableReviewQueue } from "../../review-queue.js";
 import {
   loadMultiAccountProfilesFromEnv,
@@ -27,6 +28,13 @@ export function registerReviewCommand(program: Command): void {
     .option("-n, --top <number>", "Batch review top N ranked items")
     .option("--show <number>", "Show a previously saved review")
     .option("--type <type>", "Item type: pr or issue", "pr")
+    .option("--all-open", "V5: reconcile and review every open item")
+    .option("--operations-db <path>", "Dedicated V5 operations database (never a V4 queue)")
+    .option("--max-new-calls <number>", "V5: maximum outbound attempts, including failures")
+    .option("--run-id <id>", "V5: durable budget identity; required with --resume")
+    .option("--output-dir <path>", "V5: immutable local JSON/Markdown manifests")
+    .option("--dashboard", "V5: read-only terminal dashboard")
+    .option("--refresh <seconds>", "Dashboard refresh interval", "5")
     .option("--deep", "Use Stage E grounded deep review schema (PR diff findings / dedicated Issue schema)")
     .option("--verify-accounts", "Verify multi-account provider credentials independently before execution")
     .option("--queue-db <path>", "Run or inspect durable multi-provider SQLite review queue")
@@ -47,6 +55,19 @@ export function registerReviewCommand(program: Command): void {
       "Quarantine historical invalid smoke test checkpoints (PR #6357, Issue #1940, Issue #6224)",
     )
     .action(async (numberArg: string | undefined, opts) => {
+      if (
+        opts.allOpen ||
+        opts.dashboard ||
+        (opts.status && !opts.queueDb) ||
+        opts.operationsDb ||
+        opts.maxNewCalls !== undefined ||
+        opts.runId ||
+        opts.outputDir
+      ) {
+        if (numberArg) throw new Error("V5 operations cannot be combined with a single item number");
+        await operationsCLI(opts);
+        return;
+      }
       // 1. Preflight account credentials verification
       if (opts.verifyAccounts) {
         const profiles = loadMultiAccountProfilesFromEnv(process.env);

@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -667,8 +667,7 @@ describe("PR-Prism v4 GraphQL Ingestion Scalability Remediation", () => {
     });
 
     it("preserves rich metadata end-to-end in SQLite store during runScan with REST", async () => {
-      const dir = resolve(tmpdir(), `prism-meta-preservation-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-      mkdirSync(dir, { recursive: true });
+      const dir = mkdtempSync(resolve(tmpdir(), "prism-meta-preservation-"));
       const dbPath = resolve(dir, "test.db");
       const store = new VectorStore(dbPath, 2, "test-model");
 
