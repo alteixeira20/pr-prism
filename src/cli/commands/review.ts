@@ -28,6 +28,7 @@ export function registerReviewCommand(program: Command): void {
     .option("-n, --top <number>", "Batch review top N ranked items")
     .option("--show <number>", "Show a previously saved review")
     .option("--type <type>", "Item type: pr or issue", "pr")
+    .option("--operations", "Select V5 operations (use with --status for offline inspection)")
     .option("--recover", "V5: recover expired local workers without inference")
     .option(
       "--acknowledge-uncertain <attempt-id>",
@@ -61,11 +62,11 @@ export function registerReviewCommand(program: Command): void {
     )
     .action(async (numberArg: string | undefined, opts) => {
       if (
+        opts.operations ||
         opts.recover ||
         opts.acknowledgeUncertain ||
         opts.allOpen ||
         opts.dashboard ||
-        (opts.status && !opts.queueDb) ||
         opts.operationsDb ||
         opts.maxNewCalls !== undefined ||
         opts.runId ||
@@ -75,6 +76,7 @@ export function registerReviewCommand(program: Command): void {
         await operationsCLI(opts);
         return;
       }
+      if (opts.status && !opts.queueDb) throw new Error("--status requires --queue-db for V4, or --operations for V5");
       // 1. Preflight account credentials verification
       if (opts.verifyAccounts) {
         const profiles = loadMultiAccountProfilesFromEnv(process.env);

@@ -412,7 +412,7 @@ MIT
 
 ### V5 review operations
 
-Build locally with Node 20.20 or newer: `npm ci && npm run build`; invoke `node dist/cli.js` (or install the local package in an isolated project). Native backlog operations require an explicit repository and a separate V5 data directory:
+Build locally with Node 22 or newer: `npm ci && npm run build`; invoke `node dist/cli.js` (or install the local package in an isolated project). Native backlog operations require an explicit repository and a separate V5 data directory:
 
 ```sh
 export PRISM_DATA_DIR=./review-data
@@ -420,7 +420,7 @@ export PRISM_DATA_DIR=./review-data
 node dist/cli.js review --all-open --repo example/project --type pr --dry-run --json
 node dist/cli.js review --all-open --repo example/project --type pr --max-new-calls 60 --run-id batch-1
 node dist/cli.js review --dashboard --repo example/project --type pr --refresh 5
-node dist/cli.js review --status --repo example/project --type issue --json
+node dist/cli.js review --operations --status --repo example/project --type issue --json
 ```
 
 Configure `PRISM_REVIEW_ACCOUNTS` as a JSON array, for example
@@ -428,3 +428,25 @@ Configure `PRISM_REVIEW_ACCOUNTS` as a JSON array, for example
 and supply the corresponding credential through that environment variable. Up to three distinct account IDs share durable attempt accounting. A failed or interrupted outbound attempt consumes budget. Resume with the same `--run-id`, budget and `--resume`; a new run ID authorizes a new bounded budget. Dry-run, status and dashboard dispatch no paid calls. Dry-run does persist its read-only GitHub inventory locally.
 
 Use `--type issue` for the issue evidence contract. Saved findings are unverified recommendations requiring independent source/test confirmation. Operations never post or merge. Complete PR coverage requires verified pinned sources and a complete changed-file manifest. Binary/unavailable evidence is reported as partial. Use `review --recover --repo example/project --type pr` to recover expired local work without inference; uncertain requests remain charged and require explicit `--acknowledge-uncertain ATTEMPT_ID` before retry planning. See the recorded integration verdict in the acceptance report; see [design](V5_REVIEW_OPERATIONS_DESIGN.md), [acceptance](V5_REVIEW_OPERATIONS_ACCEPTANCE.md) and [offline import plan](V5_REVIEW_OPERATIONS_IMPORT_PLAN.md).
+
+
+V5 hardening uses metadata-only inventory for backlog discovery. `inventoryKnown` counts items whose
+conversation/source evidence has not been inspected; these cannot count as completed reviews.
+Full evidence is hydrated only for selected reviews, then revalidated before each reserved request
+and final completion. Periodic probes apply to previously hydrated items and detect comment deletion,
+linked-fix changes and external actions. Unchanged metadata alone does not verify a conversation.
+Probes rotate over at most 100 hydrated items per invocation; large hydrated backlogs need multiple
+invocations for a complete verification cycle. A 403/429 records a persistent reset/Retry-After cooldown and leaves the reliable cursor unchanged;
+retry the command after that time. Permission failures also fail closed and may require token repair.
+
+V4 queue inspection remains `prism review --queue-db PATH --status --json`. V5 inspection requires
+`prism review --operations --status --repo OWNER/REPO --type pr --json` (or `--operations-db PATH`).
+Bare `review --status` reports a selector error without loading credentials. Modes cannot be mixed.
+Issue classification through `scan`/`dupes` remains embedding-first; deep issue reviews are optional
+and require explicit review execution. V5 does not import or reuse the external Python PR reviews.
+
+The package now consistently declares Node >=22, matching `@typesafe-ai/sdk@0.7.0`'s engine contract
+and the existing V4 runtime documentation. This is a deliberate compatibility change from upstream's
+Node >=20 contract, to be highlighted in the upstream PR. Passing diagnostic Node 20 tests does not
+establish supported SDK operation on Node 20. Package name/version remain `prism-triage@4.0.0`;
+this branch is a review candidate, not a published release.

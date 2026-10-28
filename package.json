@@ -34,7 +34,7 @@
     "prepublishOnly": "npm run build && npm run test"
   },
   "engines": {
-    "node": ">=20.20.0"
+    "node": ">=22.0.0"
   },
   "files": [
     "dist/",
@@ -42,6 +42,7 @@
     "prism.config.yaml",
     "README.md",
     "LICENSE",
+    "V5_UPSTREAM_READY_ACCEPTANCE.md",
     "V5_REVIEW_OPERATIONS_DESIGN.md",
     "V5_REVIEW_OPERATIONS_ACCEPTANCE.md",
     "V5_REVIEW_OPERATIONS_IMPORT_PLAN.md"

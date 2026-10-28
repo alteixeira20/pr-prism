@@ -218,7 +218,9 @@ describe("Source-backed full evidence", () => {
     await runOperations({
       store,
       source,
-      model: async () => ({ value: answer }),
+      model: async () => {
+        throw new Error("Incomplete source must not dispatch");
+      },
       accounts: [account],
       repo: e.repo,
       kind: e.kind,
@@ -227,6 +229,7 @@ describe("Source-backed full evidence", () => {
       output: join(dir, "drafts"),
     });
     expect(store.snapshot(e.repo, e.kind).counts.completed_current ?? 0).toBe(0);
+    expect(store.snapshot(e.repo, e.kind).requests.reserved).toBe(0);
   });
   it.each(["head", "base", "comments"])("rejects %s changes during source collection", async (mutate) => {
     await expect(fixture(undefined, { mutate }).source.get("example/project", "pr", 1)).rejects.toThrow(
@@ -368,6 +371,7 @@ describe("Conversation reconciliation negative controls", () => {
     const { source } = fixture(undefined, options);
     const e = await source.get("example/project", "issue", 1);
     const { store } = setup();
+    store.put(e); // Selected hydration precedes conversation freshness probes.
     const inventory = vi.spyOn(source, "inventory").mockResolvedValue([1]);
     vi.spyOn(source, "changes").mockResolvedValue([]);
     const now = Date.now();

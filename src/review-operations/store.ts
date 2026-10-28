@@ -411,14 +411,21 @@ export class OperationsStore {
         (b) => !attempts.some((a) => a.job === j.id && a.batch_hash === b.hash && a.state === "completed"),
       ),
     );
-    const seconds = charRate > 0 ? remaining.reduce((n, b) => n + b.text.length, 0) / charRate : null;
+    const inventoryKnown = current.filter((j) => {
+      const e: Evidence = JSON.parse(j.evidence);
+      return e.state === "open" && e.inventoryOnly;
+    }).length;
+    const seconds =
+      !inventoryKnown && charRate > 0 ? remaining.reduce((n, b) => n + b.text.length, 0) / charRate : null;
     const activeRuns = runs.filter((r) => r.state === "running");
     const remainingBudget = (activeRuns.length ? activeRuns : runs.slice(0, 1)).reduce(
       (n, r) => n + Math.max(0, r.budget - r.spent),
       0,
     );
     const bounded =
-      charRate > 0 ? remaining.slice(0, remainingBudget).reduce((n, b) => n + b.text.length, 0) / charRate : null;
+      !inventoryKnown && charRate > 0
+        ? remaining.slice(0, remainingBudget).reduce((n, b) => n + b.text.length, 0) / charRate
+        : null;
     const staleItems = current.filter(
       (j) =>
         effectiveState(j) !== "completed_current" &&
@@ -450,6 +457,9 @@ export class OperationsStore {
         ).length,
         remainingBudget,
       },
+      inventoryKnown,
+      evidenceFreshness:
+        "Full evidence is current only at its last authoritative observation; inventory does not verify conversations",
       totalOpen: current.filter((j) => JSON.parse(j.evidence).state === "open").length,
       counts,
       eligible: known.length,
@@ -501,7 +511,7 @@ export class OperationsStore {
         backlogRangeSeconds: seconds === null ? null : [seconds * 0.5, seconds * 2],
         boundedRangeSeconds: bounded === null ? null : [bounded * 0.5, bounded * 2],
         basis:
-          "last-hour observed evidence characters / elapsed wall time (includes concurrent processing); indicative 0.5x–2x range; excludes unavailable evidence and future changes",
+          "last-hour observed evidence characters / elapsed wall time (includes concurrent processing); indicative 0.5x–2x range; excludes unavailable evidence and future changes; N/A while inventory-only evidence remains",
       },
     };
   }

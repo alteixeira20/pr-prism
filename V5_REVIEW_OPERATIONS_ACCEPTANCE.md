@@ -1,5 +1,7 @@
 # V5 review operations acceptance
 
+Historical V5 evidence at the SHAs below. Superseded for current upstream readiness by `V5_UPSTREAM_READY_ACCEPTANCE.md`; original results are retained as provenance.
+
 **GO for integration into fork `main`.** All P0 gates below have executable evidence beyond unit tests: source-backed compiled CLI fixtures, actual SIGKILL recovery, competing processes, clean package installations and installed native CLI execution. This is an integration decision, not authorization to merge, push, publish, import production data or take GitHub actions.
 
 ## Exact source and provenance

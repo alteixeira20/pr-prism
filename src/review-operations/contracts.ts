@@ -42,7 +42,9 @@ export interface Evidence {
   coverage?: { version: 1; expectedFiles: number; mergeBase: string; manifestHash: string };
   limitations: string[];
   observedAt: string;
+  inventoryOnly?: true;
   health?: {
+    metadataHash?: string;
     remaining: string | null;
     reset: string | null;
     probes?: { route: string; digest: string; etag?: string | null }[];
@@ -142,6 +144,7 @@ export function validateResult(value: unknown, batch: Batch) {
 }
 export interface Source {
   inventory(repo: string, kind: Kind): Promise<number[]>;
+  metadata?(repo: string, kind: Kind, number: number): Promise<Evidence>;
   changes?(repo: string, kind: Kind, since: string): Promise<number[]>;
   probe?(evidence: Evidence): Promise<boolean>;
   get(repo: string, kind: Kind, number: number): Promise<Evidence>;

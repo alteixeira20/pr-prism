@@ -26,34 +26,75 @@ export async function reconcile(store: OperationsStore, source: Source, repo: st
     store.syncFence(repo, kind, owner);
     store.put(e);
   };
+  const metadata = async (number: number) => {
+    const e = source.metadata ? await source.metadata(repo, kind, number) : await source.get(repo, kind, number);
+    const row = store.db
+      .prepare(
+        "SELECT j.evidence FROM v5_current c JOIN v5_jobs j ON j.id=c.id WHERE c.repo=? AND c.kind=? AND c.number=?",
+      )
+      .get(repo, kind, number) as { evidence: string } | undefined;
+    const previousEvidence: Evidence | undefined = row && JSON.parse(row.evidence);
+    if (e.inventoryOnly && e.health?.metadataHash && previousEvidence?.health?.metadataHash === e.health.metadataHash)
+      return;
+    observe(e);
+  };
+  let probeAfter: number = previous?.probeAfter ?? 0;
+  const probe = async () => {
+    if (!source.probe) return;
+    const current = store.db
+      .prepare("SELECT j.* FROM v5_current c JOIN v5_jobs j ON j.id=c.id WHERE c.repo=? AND c.kind=?")
+      .all(repo, kind) as Job[];
+    const eligible = current
+      .filter((job) => {
+        const e: Evidence = JSON.parse(job.evidence);
+        return e.state === "open" && !e.inventoryOnly;
+      })
+      .sort((a, b) => a.number - b.number);
+    const rotation = [
+      ...eligible.filter((j) => j.number > probeAfter),
+      ...eligible.filter((j) => j.number <= probeAfter),
+    ];
+    // Bound mutable verification work; durable rotation prevents starving higher item numbers.
+    for (const job of rotation.slice(0, 100)) {
+      const e = JSON.parse(job.evidence) as Evidence;
+      if (await source.probe(e)) {
+        // Retain immutable history, but never count an uninspected changed conversation as current.
+        if (source.metadata) {
+          const fresh = await source.metadata(repo, kind, job.number);
+          observe(fresh);
+        } else observe(await source.get(repo, kind, job.number));
+      }
+      probeAfter = job.number;
+    }
+  };
   const full = !source.changes || !previous?.lastFull || now - Date.parse(previous.lastFull) >= 6 * 3600000;
   try {
+    if (previous?.retryAt && now < previous.retryAt)
+      throw Object.assign(new Error(`GitHub cooldown until ${new Date(previous.retryAt).toISOString()}`), {
+        retryAt: previous.retryAt,
+      });
     let total: number;
     let lastProbe = previous?.lastProbe;
     if (full) {
       const numbers = await source.inventory(repo, kind);
-      for (const number of numbers) observe(await source.get(repo, kind, number));
-      for (const n of new Set(store.jobs(repo, kind).map((j) => j.number)))
-        if (!numbers.includes(n)) observe(await source.get(repo, kind, n));
+      for (const number of numbers) await metadata(number);
+      const known = store.db
+        .prepare("SELECT j.number,j.evidence FROM v5_current c JOIN v5_jobs j ON j.id=c.id WHERE c.repo=? AND c.kind=?")
+        .all(repo, kind) as Pick<Job, "number" | "evidence">[];
+      const listed = new Set(numbers);
+      for (const job of known)
+        if (JSON.parse(job.evidence).state === "open" && !listed.has(job.number)) await metadata(job.number);
       const second = await source.inventory(repo, kind);
       if (JSON.stringify(numbers) !== JSON.stringify(second))
         throw new Error("Open inventory changed during reconciliation; repeat full scan");
+      await probe();
       total = numbers.length;
     } else {
       const since = new Date(Date.parse(previous.cursor ?? previous.lastReliableSync) - 5 * 60000).toISOString();
       const changed = await source.changes!(repo, kind, since);
-      for (const number of changed) observe(await source.get(repo, kind, number));
+      for (const number of changed) await metadata(number);
       if (source.probe && (!lastProbe || now - Date.parse(lastProbe) >= 5 * 60000)) {
-        const currentIds = new Set(
-          (
-            store.db.prepare("SELECT id FROM v5_current WHERE repo=? AND kind=?").all(repo, kind) as { id: string }[]
-          ).map((j) => j.id),
-        );
-        for (const job of store.jobs(repo, kind))
-          if (currentIds.has(job.id) && JSON.parse(job.evidence).state === "open" && !changed.includes(job.number)) {
-            const evidence = JSON.parse(job.evidence) as Evidence;
-            if (await source.probe(evidence)) observe(await source.get(repo, kind, job.number));
-          }
+        await probe();
         lastProbe = started;
       }
       total = store.snapshot(repo, kind).totalOpen;
@@ -66,6 +107,8 @@ export async function reconcile(store: OperationsStore, source: Source, repo: st
       cursor: started,
       lastFull: full ? started : previous.lastFull,
       lastProbe: full ? started : lastProbe,
+      probeAfter,
+      probeItemCap: 100,
       mode: full ? "full" : "incremental",
       total,
     });
@@ -76,6 +119,7 @@ export async function reconcile(store: OperationsStore, source: Source, repo: st
       started,
       reliable: false,
       error: error instanceof Error ? error.message : "sync failed",
+      retryAt: (error as { retryAt?: number }).retryAt,
     });
     throw error;
   } finally {
@@ -159,6 +203,17 @@ export async function runOperations(opts: {
         let attempt: string | undefined;
         try {
           const evidence: Evidence = JSON.parse(job.evidence);
+          if (evidence.inventoryOnly) {
+            const fresh = await source.get(repo, kind, job.number);
+            if (fresh.inventoryOnly) throw new Error("Full evidence required");
+            store.ownedSet(job.id, owner, "stale", "hydrated");
+            store.put(fresh);
+            continue;
+          }
+          if (coverageProblems(evidence).length) {
+            store.ownedSet(job.id, owner, "partial", "coverage_limitations");
+            continue;
+          }
           const plan = batches(evidence);
           const modelId = modelFingerprint(account);
           let stopped = false;
@@ -229,6 +284,14 @@ export async function runOperations(opts: {
             }
           }
         } catch (error) {
+          const retryAt = (error as { retryAt?: number }).retryAt;
+          if (retryAt)
+            store.sync(repo, kind, {
+              ...store.syncState(repo, kind),
+              reliable: false,
+              retryAt,
+              error: error instanceof Error ? error.message : "GitHub cooldown",
+            });
           const uncertain = Boolean(
             attempt &&
               (signal?.aborted ||

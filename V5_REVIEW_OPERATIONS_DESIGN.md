@@ -10,7 +10,7 @@ prism review --all-open --repo example/project --type pr --dry-run --json
 prism review --all-open --repo example/project --type pr --max-new-calls 60 --run-id batch-1
 prism review --all-open --repo example/project --type pr --max-new-calls 60 --run-id batch-1 --resume
 prism review --all-open --repo example/project --type issue --max-new-calls 60 --run-id issues-1
-prism review --status --repo example/project --type pr --json
+prism review --operations --status --repo example/project --type pr --json
 prism review --dashboard --repo example/project --type issue --refresh 5
 prism review --recover --repo example/project --type pr --json
 prism review --recover --repo example/project --type pr --acknowledge-uncertain ATTEMPT_ID --json
@@ -72,11 +72,28 @@ stateDiagram-v2
     externally_resolved --> pending: reopened identity
 ```
 
-Initial and six-hour periodic full inventories follow every GitHub pagination Link, deduplicate IDs, reject conflicting duplicates/missing pages/repeated or skipped cursors, and scope requests to the repository. Issue inventory excludes PR records. Missing stored items are fetched individually rather than inferred closed. Two inventories bracket the full scan; moving membership makes it unreliable and blocks execution.
+Initial and six-hour periodic full inventories follow GitHub pagination Links, deduplicate IDs,
+reject inconsistent/missing pages and scope requests to the repository. Issue inventory excludes PRs.
+Two inventories bracket full scans; moving membership fails sync. Metadata-only durable records
+carry `inventoryOnly` and explicit limitations. They are pending, never completed-current evidence.
+Missing stored items receive a targeted metadata request rather than being inferred closed.
 
-Other invocations use a five-minute overlap from the last reliable start cursor. Issues use GitHub's updated `since` feed, including closed items. PRs use descending updated order and stop past the overlap boundary. Newly opened, closed, merged, edited, reopened and pushed items are hydrated. A failed scan preserves its last reliable cursor. A fenced per-repository/type lease excludes competing scans.
+Other invocations use a five-minute overlap from the last reliable start cursor. Issues use the
+updated `since` feed, including closed items. PRs use descending updated order and stop past the
+overlap boundary. Metadata changes invalidate old evidence and preserve its history. Full evidence
+is hydrated only when selected for dispatch. Before any reservation, incomplete source coverage
+fails closed with zero new attempts. Failed scans preserve their reliable cursor. Rate/permission
+403 and 429 responses persist a cooldown through the later of reset, Retry-After or sixty seconds;
+no automatic HTTP retry or blocking sleep occurs. A new invocation respects the durable cooldown.
 
-Every five minutes, known open items also receive metadata/conversation probes. This detects deletions or changes that do not advance the item's update timestamp. Non-collection resources may use conditional ETags; collection pages are re-read, including their pagination links. Changed probes trigger full item evidence collection. This avoids full repository inventories and source downloads for unchanged items while retaining a periodic full membership check. These are bounded polling windows, not push notifications.
+Previously hydrated open items receive metadata/conversation probes at full scans and every five
+minutes, capped at 100 items per invocation with a durable rotating item-number cursor. With more
+than 100 hydrated items, a full probe cycle needs multiple invocations; freshness remains the last
+authoritative observation, not an assertion of five-minute freshness for the whole backlog. This detects comment deletion without a changed timestamp and linked PR merges. Changed
+probes invalidate evidence to inventory-only pending state; they do not eagerly hydrate all sources.
+Unhydrated items have no verified conversation baseline. Non-collection probes can use ETags;
+collection pages are re-read. `inventoryKnown` and observation timestamps expose these limitations.
+A fenced per-repository/type lease excludes competing scans.
 
 Immediately before every new paid call, between batches, and at finalization, the complete item evidence is fetched authoritatively. Head, base, body, labels, conversation, linked PR observations, reviews and CI statuses participate in the fingerprint. Metadata and conversation are bracketed within collection; movement rejects the snapshot. Finalization rechecks after writing pending drafts. A merge in an in-flight call can consume that unavoidable attempt, but no subsequent call occurs after observed closure/change. Approval is recorded as external activity; it never substitutes for a PR-Prism review. A merged linked PR remains candidate issue evidence, not proof an issue should be closed.
 

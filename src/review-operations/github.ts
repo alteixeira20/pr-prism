@@ -6,6 +6,8 @@ export class OperationsGitHub implements Source {
   health: Evidence["health"];
   private immutable = new Map<string, { data: any; next: string | null; etag?: string | null; size: number }>();
   private immutableBytes = 0;
+  private metadataCache = new Map<string, Evidence>();
+  private cooldownUntil = 0;
   constructor(
     private token: string,
     private request: typeof fetch = fetch,
@@ -21,6 +23,8 @@ export class OperationsGitHub implements Source {
     const cacheable = /\/git\/(commits|trees|blobs)\/[0-9a-f]{40}$/.test(url.pathname) && !etag;
     const cached = cacheable ? this.immutable.get(url.href) : undefined;
     if (cached) return cached;
+    if (Date.now() < this.cooldownUntil)
+      throw new Error(`GitHub cooldown until ${new Date(this.cooldownUntil).toISOString()}; inventory is incomplete`);
     const response = await this.request(url, {
       method: "GET",
       headers: {
@@ -36,6 +40,21 @@ export class OperationsGitHub implements Source {
       reset: response.headers.get("x-ratelimit-reset"),
     };
     if (response.status === 304 && etag) return { data: null, next: null, notModified: true, etag };
+    if (response.status === 403 || response.status === 429) {
+      const retry = response.headers.get("retry-after");
+      const delay = retry
+        ? Number.isFinite(Number(retry))
+          ? Date.now() + Number(retry) * 1000
+          : Date.parse(retry)
+        : 0;
+      this.cooldownUntil = Math.max(Date.now() + 60000, Number(this.health.reset) * 1000 || 0, delay || 0);
+      throw Object.assign(
+        new Error(
+          `GitHub rate/permission limit (${response.status}); cooldown until ${new Date(this.cooldownUntil).toISOString()}; inventory is incomplete`,
+        ),
+        { retryAt: this.cooldownUntil },
+      );
+    }
     if (!response.ok) throw new Error(`GitHub read failed (${response.status}); inventory is incomplete`);
     const next = response.headers.get("link")?.match(/<([^>]+)>; rel="next"/)?.[1] ?? null;
     const result = { data: await response.json(), next, etag: response.headers.get("etag") };
@@ -84,21 +103,74 @@ export class OperationsGitHub implements Source {
     if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error("Expected owner/repo");
     return `/repos/${repo}`;
   }
+  private remember(repo: string, kind: Kind, item: any): Evidence {
+    if (!Number.isSafeInteger(item.number) || item.number < 1 || !["open", "closed"].includes(item.state))
+      throw new Error("Invalid inventory metadata");
+    const evidence: Evidence = {
+      repo,
+      kind,
+      number: item.number,
+      state: item.merged || item.merged_at ? "merged" : item.state,
+      title: item.title,
+      body: item.body ?? "",
+      author: item.user.login,
+      createdAt: item.created_at,
+      updatedAt: item.updated_at,
+      head: item.head?.sha,
+      base: item.base?.sha,
+      draft: item.draft,
+      labels: item.labels.map((l: any) => l.name),
+      comments: [],
+      events: [],
+      files: [],
+      limitations: ["Inventory only; full evidence not inspected"],
+      inventoryOnly: true,
+      observedAt: new Date().toISOString(),
+      health: { ...this.health!, metadataHash: this.metadataHash(item) },
+    };
+    this.metadataCache.set(`${repo}:${kind}:${item.number}`, evidence);
+    return evidence;
+  }
+  private metadataHash(item: any) {
+    // Listing and detail responses have different fields. Compare only shared mutable identity.
+    return hash([
+      item.number,
+      item.state,
+      item.title,
+      item.body ?? "",
+      item.updated_at,
+      item.head?.sha,
+      item.base?.sha,
+      item.draft,
+      item.labels.map((l: any) => l.name),
+    ]);
+  }
+  async metadata(repo: string, kind: Kind, number: number): Promise<Evidence> {
+    const cached = this.metadataCache.get(`${repo}:${kind}:${number}`);
+    if (cached) return structuredClone(cached);
+    const item = (await this.getJSON(`${this.root(repo)}/${kind === "pr" ? "pulls" : "issues"}/${number}`)).data;
+    if (item.number !== number) throw new Error("GitHub metadata identity mismatch");
+    return this.remember(repo, kind, item);
+  }
   async inventory(repo: string, kind: Kind): Promise<number[]> {
+    this.metadataCache.clear();
     const items = await this.pages(
       `${this.root(repo)}/${kind === "pr" ? "pulls" : "issues"}?state=open&sort=created&direction=asc&per_page=100`,
     );
+    for (const item of items.filter((i) => kind === "pr" || !i.pull_request)) this.remember(repo, kind, item);
     return items
       .filter((i) => kind === "pr" || !i.pull_request)
       .map((i) => i.number)
       .sort((a, b) => a - b);
   }
   async changes(repo: string, kind: Kind, since: string): Promise<number[]> {
+    this.metadataCache.clear();
     const route =
       kind === "issue"
         ? `${this.root(repo)}/issues?state=all&sort=updated&direction=desc&since=${encodeURIComponent(since)}&per_page=100`
         : `${this.root(repo)}/pulls?state=all&sort=updated&direction=desc&per_page=100`;
     const items = await this.pages(route, kind === "pr" ? since : undefined);
+    for (const item of items.filter((i) => kind === "pr" || !i.pull_request)) this.remember(repo, kind, item);
     return [
       ...new Set(items.filter((i) => (kind === "pr" || !i.pull_request) && i.updated_at >= since).map((i) => i.number)),
     ].sort((a, b) => a - b);
@@ -232,7 +304,7 @@ export class OperationsGitHub implements Source {
         files: [],
         limitations: [],
         observedAt: new Date().toISOString(),
-        health: { ...this.health!, probes: [...probes.values()] },
+        health: { ...this.health!, metadataHash: this.metadataHash(first), probes: [...probes.values()] },
       };
     const comments = await pages(`${root}/issues/${number}/comments?per_page=100`);
     const events = await pages(`${root}/issues/${number}/timeline?per_page=100`);
@@ -306,7 +378,7 @@ export class OperationsGitHub implements Source {
       coverage,
       limitations,
       observedAt: new Date().toISOString(),
-      health: { ...this.health!, probes: [...probes.values()] },
+      health: { ...this.health!, metadataHash: this.metadataHash(first), probes: [...probes.values()] },
     };
   }
 }

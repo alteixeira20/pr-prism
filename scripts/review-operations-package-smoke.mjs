@@ -113,7 +113,7 @@ if (process.env.PRISM_SMOKE_FIXTURE === "1") {
   assert.equal(result.runs[0].spent, 2);
   const recorded = readFileSync(trace, "utf8");
   assert.equal(recorded.split("\n").filter((s) => s.startsWith("POST ")).length, 2);
-  assert.equal(invoke(["--status"]).counts.completed_current, 1);
+  assert.equal(invoke(["--operations", "--status"]).counts.completed_current, 1);
   assert.equal(invoke(["--dashboard"]).counts.completed_current, 1);
   invoke(["--recover"]);
   assert.equal(readFileSync(trace, "utf8"), recorded);

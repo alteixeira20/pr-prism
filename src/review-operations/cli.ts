@@ -12,7 +12,7 @@ export function renderSnapshot(value: ReturnType<OperationsStore["snapshot"]>, c
   const lines = [
     `${value.repo} | ${value.type}`,
     `Current ${value.counts.completed_current ?? 0}/${value.totalOpen} open | missing ${value.missingCurrent} | stale ${value.staleItems} (${value.historicalStale} historical)`,
-    `Pending ${value.counts.pending ?? 0} | incomplete evidence ${value.counts.partial ?? 0} | failed ${value.counts.failed ?? 0} | paused ${value.counts.paused ?? 0}`,
+    `Inventory only ${value.inventoryKnown} | Pending ${value.counts.pending ?? 0} | incomplete evidence ${value.counts.partial ?? 0} | failed ${value.counts.failed ?? 0} | paused ${value.counts.paused ?? 0}`,
     `Externally resolved/skipped ${value.externallyHandled} | active workers ${value.workers.length}`,
     `Requests reserved/attempted ${value.requests.reserved} | uncertain ${value.requests.uncertain} | remaining budget ${value.requests.remainingBudget}`,
     `Throughput ${value.throughput.completedBatchesPerMinute?.toFixed(2) ?? "N/A"} batches/min`,
@@ -47,6 +47,32 @@ const accountSchema = z
 export async function operationsCLI(opts: any) {
   if (opts.type !== "pr" && opts.type !== "issue") throw new Error("--type must be pr or issue");
   if (!opts.repo) throw new Error("--repo owner/repo is required for V5 operations");
+  if (
+    opts.queueDb ||
+    opts.top ||
+    opts.show ||
+    opts.verifyAccounts ||
+    opts.model ||
+    opts.tier ||
+    opts.maxJobs ||
+    opts.maxTokens ||
+    opts.prsOnly ||
+    opts.issuesOnly ||
+    opts.deep ||
+    opts.openOnly ||
+    opts.accountStats ||
+    opts.verifyModels ||
+    opts.quarantineSmokeTest
+  )
+    throw new Error("V5 operations cannot be combined with legacy queue/review modes");
+  if ([opts.status, opts.dashboard, opts.recover, opts.allOpen].filter(Boolean).length > 1)
+    throw new Error("Choose exactly one V5 status, dashboard, recovery or all-open mode");
+  if (opts.acknowledgeUncertain && !opts.recover) throw new Error("--acknowledge-uncertain requires --recover");
+  if (
+    (opts.status || opts.dashboard || opts.recover) &&
+    (opts.maxNewCalls !== undefined || opts.resume || opts.dryRun || opts.runId || opts.outputDir)
+  )
+    throw new Error("Inspection and recovery cannot be combined with execution flags");
   const kind: Kind = opts.type;
   const file = resolve(opts.operationsDb ?? resolve(getDataDir(), "review-operations-v5.sqlite"));
   const inspecting = opts.status || opts.dashboard;
@@ -99,19 +125,6 @@ export async function operationsCLI(opts: any) {
     return;
   }
   if (!opts.allOpen) throw new Error("--all-open is required to run V5 operations");
-  if (
-    opts.queueDb ||
-    opts.top ||
-    opts.show ||
-    opts.verifyAccounts ||
-    opts.model ||
-    opts.tier ||
-    opts.maxJobs ||
-    opts.maxTokens ||
-    opts.prsOnly ||
-    opts.issuesOnly
-  )
-    throw new Error("V5 operations cannot be combined with legacy queue/review modes");
   // Dry run exits before account configuration or provider initialization.
   const budget = Number(opts.maxNewCalls);
   const accounts = opts.dryRun ? [] : accountSchema.parse(JSON.parse(process.env.PRISM_REVIEW_ACCOUNTS ?? "[]"));

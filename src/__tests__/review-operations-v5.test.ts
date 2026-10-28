@@ -9,6 +9,7 @@ import {
   type Account,
   batches,
   type Evidence,
+  hash,
   type Kind,
   type Model,
   modelFingerprint,
@@ -16,6 +17,7 @@ import {
   validateResult,
 } from "../review-operations/contracts.js";
 import { OperationsGitHub } from "../review-operations/github.js";
+import { blobHash, coverageManifest } from "../review-operations/integrity.js";
 import { reconcile, runOperations } from "../review-operations/runner.js";
 import { OperationsStore } from "../review-operations/store.js";
 import { getIsolatedEnv } from "./cli-test-env.js";
@@ -38,25 +40,44 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
-const evidence = (number = 1, kind: Kind = "pr"): Evidence => ({
-  repo: "example/project",
-  kind,
-  number,
-  state: "open",
-  title: `Item ${number}`,
-  body: "source body",
-  author: "contributor",
-  createdAt: "2026-01-01",
-  updatedAt: "2026-01-02",
-  head: kind === "pr" ? "head1" : undefined,
-  base: kind === "pr" ? "base1" : undefined,
-  labels: [],
-  comments: [],
-  events: [],
-  files: kind === "pr" ? [{ path: "src/a.ts", patch: "@@ -1 +1 @@\n-old\n+new\n", status: "modified" }] : [],
-  limitations: [],
-  observedAt: "2026-01-03",
-});
+const evidence = (number = 1, kind: Kind = "pr"): Evidence => {
+  const e: Evidence = {
+    repo: "example/project",
+    kind,
+    number,
+    state: "open",
+    title: `Item ${number}`,
+    body: "source body",
+    author: "contributor",
+    createdAt: "2026-01-01",
+    updatedAt: "2026-01-02",
+    head: kind === "pr" ? "head1" : undefined,
+    base: kind === "pr" ? "base1" : undefined,
+    labels: [],
+    comments: [],
+    events: [],
+    files: kind === "pr" ? [{ path: "src/a.ts", patch: "@@ -1 +1 @@\n-old\n+new\n", status: "modified" }] : [],
+    limitations: [],
+    observedAt: "2026-01-03",
+  };
+  if (kind === "pr") {
+    e.files[0].source = {
+      before: "old\n",
+      after: "new\n",
+      baseBlob: blobHash(Buffer.from("old\n")),
+      headBlob: blobHash(Buffer.from("new\n")),
+      baseMode: "100644",
+      headMode: "100644",
+    };
+    e.coverage = {
+      version: 1,
+      expectedFiles: e.files.length,
+      mergeBase: "base1",
+      manifestHash: hash(coverageManifest(e.files)),
+    };
+  }
+  return e;
+};
 const account = (id = "a"): Account => ({
   id,
   model: "fake-model",
@@ -121,8 +142,11 @@ describe("V5 inventory and isolated storage", () => {
       const data = Array.from({ length: page === 12 ? 59 : 100 }, (_, i) => ({
         id: start + i + 1,
         number: start + i + 1,
+        state: "open",
+        user: { login: "fixture" },
+        labels: [],
       }));
-      if (page === 2) data.push({ id: 100, number: 100 });
+      if (page === 2) data.push({ id: 100, number: 100, state: "open", user: { login: "fixture" }, labels: [] });
       return new Response(JSON.stringify(data), {
         headers:
           page < 12
@@ -228,6 +252,7 @@ describe("V5 race and checkpoint contracts", () => {
     const item = evidence();
     const patch = "x".repeat(264000);
     item.files[0].patch = patch;
+    delete item.files[0].source;
     item.files.push({ path: "binary", status: "renamed", previousPath: "old.bin" });
     item.limitations.push("binary patch unavailable");
     const plan = batches(item);
@@ -251,7 +276,7 @@ describe("V5 race and checkpoint contracts", () => {
     expect(model).toHaveBeenCalledTimes(1);
     await run(store, dir, sourceFor(item), model, { budget: 1, runId: "next" });
     expect(model).toHaveBeenCalledTimes(2);
-    expect(store.snapshot(item.repo, "pr").counts.partial).toBe(1); // Legacy evidence/checkpoints retained; coverage is not fabricated.
+    expect(store.snapshot(item.repo, "pr").counts.completed_current).toBe(1); // Exact source-backed checkpoints are reused.
     const readonly = new OperationsStore(join(dir, "v5.sqlite"), true);
     try {
       expect(readonly.snapshot(item.repo, "pr").attempts).toHaveLength(2);
@@ -374,6 +399,7 @@ describe("V5 CLI executions", () => {
     const { operationsCLI } = await import("../review-operations/cli.js");
     const sourceSpy = vi.spyOn(OperationsGitHub.prototype, "inventory").mockResolvedValue([1]);
     vi.spyOn(OperationsGitHub.prototype, "get").mockResolvedValue(evidence());
+    vi.spyOn(OperationsGitHub.prototype, "metadata").mockResolvedValue(evidence());
     const old = process.env.GITHUB_TOKEN;
     process.env.GITHUB_TOKEN = "fake";
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -451,7 +477,7 @@ globalThis.fetch=async (input,options)=>{
     expect(result.attempts).toHaveLength(2);
     expect(result.runs[0].spent).toBe(2);
     expect(result.counts.completed_current).toBe(1);
-    expect(execute(["--status"]).attempts).toHaveLength(2);
+    expect(execute(["--operations", "--status"]).attempts).toHaveLength(2);
     expect(execute(["--dashboard"]).attempts).toHaveLength(2);
   });
   it("keeps reopened items visible and claims only the latest evidence", () => {
