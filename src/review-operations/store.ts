@@ -39,6 +39,7 @@ export class OperationsStore {
       this.db.pragma("journal_mode = WAL");
       this.db.pragma("synchronous = FULL");
       this.db.exec(`CREATE TABLE IF NOT EXISTS v5_jobs(id TEXT PRIMARY KEY, repo TEXT, kind TEXT, number INTEGER, fingerprint TEXT, evidence TEXT, state TEXT, reason TEXT, owner TEXT, expires INTEGER);
+        CREATE INDEX IF NOT EXISTS v5_jobs_identity ON v5_jobs(repo,kind,number);
         CREATE TABLE IF NOT EXISTS v5_current(repo TEXT,kind TEXT,number INTEGER,id TEXT,PRIMARY KEY(repo,kind,number));
         CREATE TABLE IF NOT EXISTS v5_runs(id TEXT PRIMARY KEY, budget INTEGER NOT NULL, spent INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS v5_attempts(id TEXT PRIMARY KEY, run TEXT, job TEXT, account TEXT, model TEXT, batch INTEGER, batch_hash TEXT, state TEXT, result TEXT, started INTEGER, finished INTEGER, latency REAL, spend REAL);
@@ -67,10 +68,11 @@ export class OperationsStore {
     const id = hash([e.repo, e.kind, e.number, fp]);
     this.db
       .transaction(() => {
-        const previous = this.jobs(e.repo, e.kind).filter(
-          (j) =>
-            j.number === e.number && j.fingerprint !== fp && j.state !== "stale" && j.state !== "externally_resolved",
-        );
+        const previous = this.db
+          .prepare(
+            "SELECT * FROM v5_jobs WHERE repo=? AND kind=? AND number=? AND fingerprint!=? AND state NOT IN ('stale','externally_resolved')",
+          )
+          .all(e.repo, e.kind, e.number, fp) as Job[];
         for (const j of previous) {
           this.set(
             j.id,

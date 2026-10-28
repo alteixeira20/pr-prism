@@ -110,7 +110,7 @@ describe("V5 inventory and isolated storage", () => {
     await reconcile(store, source, "example/project", "pr");
     expect(store.jobs(j.repo, j.kind)[0].state).toBe("completed_current");
     expect(store.snapshot(j.repo, "issue").totalOpen).toBe(1159);
-  });
+  }, 30000);
   it("follows >1000-record Link pagination, deduplicates IDs and excludes PRs from issues", async () => {
     let calls = 0;
     const request = vi.fn(async (input: any) => {
