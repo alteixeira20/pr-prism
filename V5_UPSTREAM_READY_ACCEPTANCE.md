@@ -250,3 +250,72 @@ gh pr create --repo StressTestor/pr-prism --base main --head alteixeira20:main \
   --title 'Add V4 maintainer workflows and V5 durable review operations' \
   --body-file V5_UPSTREAM_READY_ACCEPTANCE.md
 ```
+
+## Post-audit CI remediation addendum (2026-10-28)
+
+An independent V4/V5 audit identified actionable findings regarding CI matrix configuration,
+OS-level network isolation test handling on containerized/virtualized runners, package distribution
+contents, and documentation consistency. This addendum documents the confirmed findings, code
+remediations, and validation evidence without modifying the historical acceptance sections above.
+
+### Distinction of validation states
+
+1. **Original local acceptance**:
+   - Executed on a Linux host with user namespaces and bubblewrap (`bwrap`) support.
+   - Resulted in 78 test files passing (1,200 tests passed, 0 failed, 0 skipped).
+   - Bundled 393 files in the npm package archive (including internal V5 planning documents).
+2. **Original remote CI failure**:
+   - On GitHub-hosted runners where `bwrap --unshare-net` is absent or unprivileged user namespace
+     creation is not available by default, the OS-level isolation test unconditionally called
+     `assertOsNetworkIsolationSupported()`, causing an unhandled test error and CI job failure.
+   - The CI workflow matrix ran `[20.x, 22.x, 24.x]`, contradicting the package declaration of
+     `engines.node: ">=22.0.0"`.
+3. **Remediation source changes**:
+   - `src/__tests__/network-sandbox.ts`: Added structured capability detection via
+     `osNetworkIsolationUnsupportedReason()`, `getOsNetworkIsolationDetail()`, and
+     `evaluateOsNetworkIsolationMode()`. Failure reasons distinguish non-Linux platforms (`not-linux`),
+     missing binary (`bwrap-not-found`), rejected user namespace creation (`namespace-rejected`),
+     and execution probe errors (`sandbox-error`). Sandbox unavailability is not attributed solely
+     to AppArmor.
+   - `src/__tests__/orchestrated-e2e.test.ts`:
+     - Normal mode: If OS-level network isolation is unsupported, records an explicit Vitest skip
+       via `ctx.skip()` with the diagnostic reason. The test is never reported as verified or passed.
+       Other network interception tests in the suite continue running.
+     - Strict mode (`STRICT_NETWORK_ISOLATION=1`): Missing bubblewrap or rejected namespaces cause
+       a hard test failure; failures are never converted into skips.
+     - Supported environment: Executes all four isolation controls (DNS lookup denial, RFC 5737
+       TCP `ENETUNREACH`, child subprocess namespace inheritance, and isolated CLI `--version`).
+     - Dynamic version assertion: Replaced hardcoded `"4.0.0"` with local `package.json` version read.
+     - Added 3 focused capability handling regression tests, bringing total test count to 1,203.
+   - `.github/workflows/ci.yml`:
+     - Set `strategy.fail-fast: false`.
+     - Matrix restricted to supported `[22.x, 24.x]` (Node 20.x removed from release gating).
+     - Added explicit `npm run typecheck` step before `npm test`.
+     - Added dedicated `linux-sandbox-verification` job on `ubuntu-latest` with bubblewrap
+       provisioned via package manager, executing the isolation test under `STRICT_NETWORK_ISOLATION=1`.
+   - `CONTRIBUTING.md`:
+     - Updated minimum Node requirement from `>=20` to `>=22`.
+     - Documented that `@typesafe-ai/sdk` and runtime requirements dictate Node 22+ APIs.
+   - `package.json`:
+     - Removed 4 internal development/acceptance files from the npm package `files` whitelist
+       (`V5_UPSTREAM_READY_ACCEPTANCE.md`, `V5_REVIEW_OPERATIONS_DESIGN.md`,
+       `V5_REVIEW_OPERATIONS_ACCEPTANCE.md`, `V5_REVIEW_OPERATIONS_IMPORT_PLAN.md`).
+     - Files remain tracked in Git; packaged file count reduced from 393 to 389.
+4. **New local validation**:
+   - Node 24.22.0 (local environment):
+     - `npm run build`: PASS, exit 0.
+     - `npm run lint`: PASS, exit 0 (201 files checked, 0 errors).
+     - `npm run typecheck`: PASS, exit 0 (`tsc --noEmit` and server tsconfig).
+     - `npm test`: 78 test files passed (1,203 tests passed, 0 failed, 0 skipped).
+     - `STRICT_NETWORK_ISOLATION=1 npx vitest run src/__tests__/orchestrated-e2e.test.ts`: PASS, 17/17 passed.
+     - `npm run ci`: PASS, exit 0.
+     - `npm pack --dry-run --json`: 389 entries packaged, 0 internal markdown files packaged.
+     - Executable smoke: `node dist/cli.js --version` (4.0.0) and `node dist/cli.js --help` exit 0.
+5. **Accurate accounting of test outcomes**:
+   - On hosts with working bubblewrap isolation: 1,203 passed, 0 failed, 0 skipped.
+   - On hosts without bubblewrap isolation: 1,202 passed, 0 failed, 1 explicitly skipped.
+   - Test counts never claim 1,200 (or 1,203) passed when the OS isolation test was skipped.
+6. **Non-claims and boundaries**:
+   - No live provider or live GitHub workload verification is performed or claimed.
+   - No remote exactly-once execution is claimed.
+   - Node >=22 compatibility contract is enforced and documented.
