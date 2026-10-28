@@ -410,9 +410,9 @@ see [CONTRIBUTING.md](CONTRIBUTING.md)
 
 MIT
 
-### V5 review operations (development preview)
+### V5 review operations
 
-Build locally with Node 22 or newer: `npm ci && npm run build`; invoke `node dist/cli.js` (or install the local package in an isolated project). Native backlog operations require an explicit repository and a separate V5 data directory:
+Build locally with Node 20.20 or newer: `npm ci && npm run build`; invoke `node dist/cli.js` (or install the local package in an isolated project). Native backlog operations require an explicit repository and a separate V5 data directory:
 
 ```sh
 export PRISM_DATA_DIR=./review-data
@@ -427,4 +427,4 @@ Configure `PRISM_REVIEW_ACCOUNTS` as a JSON array, for example
 `[{"id":"account-a","model":"your-model","endpoint":"https://provider.example/v1/chat/completions","keyEnv":"REVIEW_API_KEY"}]`,
 and supply the corresponding credential through that environment variable. Up to three distinct account IDs share durable attempt accounting. A failed or interrupted outbound attempt consumes budget. Resume with the same `--run-id`, budget and `--resume`; a new run ID authorizes a new bounded budget. Dry-run, status and dashboard dispatch no paid calls. Dry-run does persist its read-only GitHub inventory locally.
 
-Use `--type issue` for the issue evidence contract. Saved findings are unverified recommendations requiring independent source/test confirmation. Operations never post or merge. REST patch coverage limitations are reported as partial. This development preview is not yet approved for fork-main consolidation; see [design](V5_REVIEW_OPERATIONS_DESIGN.md), [acceptance](V5_REVIEW_OPERATIONS_ACCEPTANCE.md) and [offline import plan](V5_REVIEW_OPERATIONS_IMPORT_PLAN.md).
+Use `--type issue` for the issue evidence contract. Saved findings are unverified recommendations requiring independent source/test confirmation. Operations never post or merge. Complete PR coverage requires verified pinned sources and a complete changed-file manifest. Binary/unavailable evidence is reported as partial. Use `review --recover --repo example/project --type pr` to recover expired local work without inference; uncertain requests remain charged and require explicit `--acknowledge-uncertain ATTEMPT_ID` before retry planning. See the recorded integration verdict in the acceptance report; see [design](V5_REVIEW_OPERATIONS_DESIGN.md), [acceptance](V5_REVIEW_OPERATIONS_ACCEPTANCE.md) and [offline import plan](V5_REVIEW_OPERATIONS_IMPORT_PLAN.md).

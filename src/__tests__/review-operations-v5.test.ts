@@ -251,7 +251,7 @@ describe("V5 race and checkpoint contracts", () => {
     expect(model).toHaveBeenCalledTimes(1);
     await run(store, dir, sourceFor(item), model, { budget: 1, runId: "next" });
     expect(model).toHaveBeenCalledTimes(2);
-    expect(store.snapshot(item.repo, "pr").counts.completed_current).toBe(1);
+    expect(store.snapshot(item.repo, "pr").counts.partial).toBe(1); // Legacy evidence/checkpoints retained; coverage is not fabricated.
     const readonly = new OperationsStore(join(dir, "v5.sqlite"), true);
     try {
       expect(readonly.snapshot(item.repo, "pr").attempts).toHaveLength(2);
@@ -278,7 +278,7 @@ describe("V5 race and checkpoint contracts", () => {
     expect(model).toHaveBeenCalledTimes(1);
     const snap = store.snapshot(item.repo, "pr");
     expect(snap.runs[0].spent).toBe(1);
-    expect(snap.counts.failed).toBe(1);
+    expect(failure === "timeout" ? snap.counts.paused : snap.counts.failed).toBe(1);
   });
   it("marks uncheckpointed crashed work paused without retrying a charged attempt", () => {
     const { store } = setup();
@@ -404,6 +404,9 @@ describe("V5 compiled CLI fixture round trip", () => {
     writeFileSync(
       preload,
       `
+import {createHash} from "node:crypto";
+const old=Buffer.from("old\\n"),updated=Buffer.from("new\\n");
+const blob=b=>createHash("sha1").update("blob "+b.length+"\\0").update(b).digest("hex");
 const meta={id:1,number:1,state:"open",title:"Fixture",body:"Fake source",user:{login:"fake"},created_at:"2026-01-01",updated_at:"2026-01-02",head:{sha:"h"},base:{sha:"b"},labels:[],changed_files:1};
 globalThis.fetch=async (input,options)=>{
  const url=new URL(input); let data;
@@ -412,7 +415,11 @@ globalThis.fetch=async (input,options)=>{
  const p=url.pathname;
  if(p==="/repos/example/project/pulls") data=[meta];
  else if(p==="/repos/example/project/pulls/1") data=meta;
- else if(p.endsWith("/files")) data=[{filename:"src/a.ts",patch:"@@ -1 +1 @@\\n-old\\n+new",status:"modified"}];
+ else if(p.endsWith("/files")) data=[{filename:"src/a.ts",patch:"@@ -1 +1 @@\\n-old\\n+new",status:"modified",sha:blob(updated)}];
+ else if(p.includes("/compare/")) data={merge_base_commit:{sha:"b"}};
+ else if(p.includes("/git/commits/")) data={sha:p.endsWith("/b")?"b":"h",tree:{sha:p.endsWith("/b")?"old-tree":"new-tree"}};
+ else if(p.includes("/git/trees/")) {const before=p.includes("old-");data={truncated:false,tree:p.endsWith("-tree")?[{path:"src",type:"tree",sha:before?"old-src":"new-src",mode:"040000"}]:[{path:"a.ts",type:"blob",sha:blob(before?old:updated),mode:"100644"}]};}
+ else if(p.includes("/git/blobs/")) {const bytes=p.endsWith(blob(old))?old:updated;data={sha:blob(bytes),size:bytes.length,encoding:"base64",content:bytes.toString("base64")};}
  else if(p.endsWith("/status")) data={state:"success",statuses:[]};
  else if(p.endsWith("/comments")||p.endsWith("/timeline")||p.endsWith("/reviews")) data=[];
  else throw Error("Unexpected fixture route "+p);
@@ -443,7 +450,7 @@ globalThis.fetch=async (input,options)=>{
     const result = execute(["--all-open", "--max-new-calls", "2", "--run-id", "fixture"]);
     expect(result.attempts).toHaveLength(2);
     expect(result.runs[0].spent).toBe(2);
-    expect(result.counts.partial).toBe(1);
+    expect(result.counts.completed_current).toBe(1);
     expect(execute(["--status"]).attempts).toHaveLength(2);
     expect(execute(["--dashboard"]).attempts).toHaveLength(2);
   });

@@ -28,6 +28,11 @@ export function registerReviewCommand(program: Command): void {
     .option("-n, --top <number>", "Batch review top N ranked items")
     .option("--show <number>", "Show a previously saved review")
     .option("--type <type>", "Item type: pr or issue", "pr")
+    .option("--recover", "V5: recover expired local workers without inference")
+    .option(
+      "--acknowledge-uncertain <attempt-id>",
+      "V5 recovery: authorize retry planning for one uncertain charged request",
+    )
     .option("--all-open", "V5: reconcile and review every open item")
     .option("--operations-db <path>", "Dedicated V5 operations database (never a V4 queue)")
     .option("--max-new-calls <number>", "V5: maximum outbound attempts, including failures")
@@ -56,6 +61,8 @@ export function registerReviewCommand(program: Command): void {
     )
     .action(async (numberArg: string | undefined, opts) => {
       if (
+        opts.recover ||
+        opts.acknowledgeUncertain ||
         opts.allOpen ||
         opts.dashboard ||
         (opts.status && !opts.queueDb) ||

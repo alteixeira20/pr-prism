@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   type Account,
   batches,
@@ -13,30 +13,74 @@ import {
   type Source,
   validateResult,
 } from "./contracts.js";
+import { coverageManifest, coverageProblems } from "./integrity.js";
 import type { Job, OperationsStore } from "./store.js";
 
-export async function reconcile(store: OperationsStore, source: Source, repo: string, kind: Kind) {
-  const started = new Date().toISOString();
+export async function reconcile(store: OperationsStore, source: Source, repo: string, kind: Kind, now = Date.now()) {
+  const started = new Date(now).toISOString();
+  const owner = randomUUID();
+  if (!store.syncLock(repo, kind, owner)) throw new Error("Reconciliation already active for repository/type");
+  const heartbeat = setInterval(() => store.syncHeartbeat(repo, kind, owner), 10000);
+  const previous = store.syncState(repo, kind);
+  const observe = (e: Evidence) => {
+    store.syncFence(repo, kind, owner);
+    store.put(e);
+  };
+  const full = !source.changes || !previous?.lastFull || now - Date.parse(previous.lastFull) >= 6 * 3600000;
   try {
-    const numbers = await source.inventory(repo, kind);
-    for (const number of numbers) store.put(await source.get(repo, kind, number));
-    // Missing records are explicitly fetched: a partial inventory never implies closure.
-    for (const n of new Set(store.jobs(repo, kind).map((j) => j.number)))
-      if (!numbers.includes(n)) store.put(await source.get(repo, kind, n));
-    const second = await source.inventory(repo, kind);
-    if (JSON.stringify(numbers) !== JSON.stringify(second))
-      throw new Error("Open inventory changed during reconciliation; repeat full scan");
+    let total: number;
+    let lastProbe = previous?.lastProbe;
+    if (full) {
+      const numbers = await source.inventory(repo, kind);
+      for (const number of numbers) observe(await source.get(repo, kind, number));
+      for (const n of new Set(store.jobs(repo, kind).map((j) => j.number)))
+        if (!numbers.includes(n)) observe(await source.get(repo, kind, n));
+      const second = await source.inventory(repo, kind);
+      if (JSON.stringify(numbers) !== JSON.stringify(second))
+        throw new Error("Open inventory changed during reconciliation; repeat full scan");
+      total = numbers.length;
+    } else {
+      const since = new Date(Date.parse(previous.cursor ?? previous.lastReliableSync) - 5 * 60000).toISOString();
+      const changed = await source.changes!(repo, kind, since);
+      for (const number of changed) observe(await source.get(repo, kind, number));
+      if (source.probe && (!lastProbe || now - Date.parse(lastProbe) >= 5 * 60000)) {
+        const currentIds = new Set(
+          (
+            store.db.prepare("SELECT id FROM v5_current WHERE repo=? AND kind=?").all(repo, kind) as { id: string }[]
+          ).map((j) => j.id),
+        );
+        for (const job of store.jobs(repo, kind))
+          if (currentIds.has(job.id) && JSON.parse(job.evidence).state === "open" && !changed.includes(job.number)) {
+            const evidence = JSON.parse(job.evidence) as Evidence;
+            if (await source.probe(evidence)) observe(await source.get(repo, kind, job.number));
+          }
+        lastProbe = started;
+      }
+      total = store.snapshot(repo, kind).totalOpen;
+    }
+    store.syncFence(repo, kind, owner);
     store.sync(repo, kind, {
       started,
-      completed: new Date().toISOString(),
+      completed: new Date(now).toISOString(),
       reliable: true,
       cursor: started,
-      mode: "full reconciliation every run",
-      total: numbers.length,
+      lastFull: full ? started : previous.lastFull,
+      lastProbe: full ? started : lastProbe,
+      mode: full ? "full" : "incremental",
+      total,
     });
   } catch (error) {
-    store.sync(repo, kind, { started, reliable: false, error: error instanceof Error ? error.message : "sync failed" });
+    store.syncFence(repo, kind, owner);
+    store.sync(repo, kind, {
+      ...previous,
+      started,
+      reliable: false,
+      error: error instanceof Error ? error.message : "sync failed",
+    });
     throw error;
+  } finally {
+    clearInterval(heartbeat);
+    store.syncUnlock(repo, kind, owner);
   }
 }
 function atomic(file: string, value: string) {
@@ -50,6 +94,12 @@ function atomic(file: string, value: string) {
   }
   try {
     linkSync(temp, file);
+    const directory = openSync(dirname(file), "r");
+    try {
+      fsyncSync(directory);
+    } finally {
+      closeSync(directory);
+    }
   } finally {
     unlinkSync(temp);
   }
@@ -82,6 +132,8 @@ export async function runOperations(opts: {
   const cap = opts.cap ?? 3;
   if (!Number.isSafeInteger(cap) || cap < 1 || cap > 3) throw new Error("Worker cap must be 1..3");
   store.startRun(runId, budget);
+  store.db.prepare("INSERT OR IGNORE INTO v5_run_scope VALUES(?,?,?)").run(runId, repo, kind);
+  store.recover(repo, kind);
   const budgetLeft = () =>
     (store.db.prepare("SELECT budget-spent n FROM v5_runs WHERE id=?").get(runId) as { n: number }).n > 0;
   async function valid(job: Job): Promise<boolean> {
@@ -112,7 +164,7 @@ export async function runOperations(opts: {
           let stopped = false;
           for (const batch of plan) {
             if (signal?.aborted) {
-              store.set(job.id, "paused", "cancelled");
+              store.ownedSet(job.id, owner, "paused", "cancelled");
               stopped = true;
               break;
             }
@@ -121,24 +173,41 @@ export async function runOperations(opts: {
               stopped = true;
               break;
             }
-            attempt = store.reserve(runId, job, account.id, modelId, batch.index, batch.hash, owner, cap);
+            if (signal?.aborted) {
+              store.ownedSet(job.id, owner, "paused", "cancelled");
+              stopped = true;
+              break;
+            }
+            attempt = store.reserve(
+              runId,
+              job,
+              account.id,
+              modelId,
+              batch.index,
+              batch.hash,
+              owner,
+              cap,
+              account.leaseKey ?? account.id,
+            );
             if (!attempt) {
-              store.set(job.id, "partial", budgetLeft() ? "account_or_worker_busy" : "budget_stop");
+              store.ownedSet(job.id, owner, "partial", budgetLeft() ? "account_or_worker_busy" : "budget_stop");
               stopped = true;
               break;
             }
             const result = await model(account, evidence, batch, signal);
             const parsed = validateResult(result.value, batch);
-            store.finish(attempt, "completed", parsed, result.latencyMs, result.spend);
+            store.finish(attempt, "completed", parsed, result.latencyMs, result.spend, owner);
             attempt = undefined;
             store.db.prepare("DELETE FROM v5_leases WHERE owner=?").run(owner);
           }
           if (!stopped) {
             if (await valid(job)) {
-              const state = evidence.limitations.length ? "partial" : "completed_current";
+              const problems = coverageProblems(evidence);
+              const state = problems.length ? "partial" : "completed_current";
               const manifest = {
                 job: job.id,
-                stateAtExport: state,
+                stateAtExport: "pending_final_confirmation",
+                proposedCoverageState: state,
                 observedAt: new Date().toISOString(),
                 currentStatusSource: "v5_current and v5_jobs in operations database",
                 evidenceHash: job.fingerprint,
@@ -146,19 +215,43 @@ export async function runOperations(opts: {
                 base: evidence.base,
                 prompt: PROMPT,
                 model: modelId,
+                files: coverageManifest(evidence.files),
                 coverage: plan.map(({ text: _text, ...b }) => b),
-                limitations: evidence.limitations,
+                limitations: problems,
                 attempts: store.db.prepare("SELECT * FROM v5_attempts WHERE job=?").all(job.id),
                 unverified: true,
               };
               exportDraft(output, job, manifest);
-              store.set(job.id, state, evidence.limitations.length ? "coverage_limitations" : null);
+              const required = plan.every((b) => store.checkpoint(job.id, modelId, b.hash));
+              if (!required) throw new Error("Incomplete durable batch manifest");
+              if (await valid(job))
+                store.ownedSet(job.id, owner, state, problems.length ? "coverage_limitations" : null);
             }
           }
         } catch (error) {
-          if (attempt) store.finish(attempt, "failed", { error: error instanceof Error ? error.name : "failure" });
-          // Provider errors are final for this run. No paid retries, including invalid schema.
-          store.set(job.id, "failed", attempt ? "provider_or_schema_failure" : "remote_or_export_failure");
+          const uncertain = Boolean(
+            attempt &&
+              (signal?.aborted ||
+                (error instanceof Error &&
+                  (/AbortError|TimeoutError|TypeError/.test(error.name) ||
+                    /timeout|aborted|network|fetch failed/i.test(error.message)))),
+          );
+          if (attempt)
+            store.finish(
+              attempt,
+              uncertain ? "uncertain" : "failed",
+              { error: error instanceof Error ? error.message : "failure" },
+              undefined,
+              undefined,
+              owner,
+            );
+          // HTTP/schema failures have a known local outcome. Timeouts/cancellation may have reached the provider.
+          store.ownedSet(
+            job.id,
+            owner,
+            uncertain || signal?.aborted ? "paused" : "failed",
+            uncertain ? "uncertain_request" : attempt ? "provider_or_schema_failure" : "remote_or_export_failure",
+          );
           break;
         } finally {
           clearInterval(heartbeat);

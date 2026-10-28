@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import type { FileSource } from "./integrity.js";
 
 export type Kind = "pr" | "issue";
 export type State =
@@ -30,10 +31,22 @@ export interface Evidence {
   labels: string[];
   comments: unknown[];
   events: unknown[];
-  files: { path: string; patch?: string; previousPath?: string; status: string }[];
+  files: {
+    path: string;
+    patch?: string;
+    previousPath?: string;
+    status: string;
+    source?: FileSource;
+    objectSha?: string;
+  }[];
+  coverage?: { version: 1; expectedFiles: number; mergeBase: string; manifestHash: string };
   limitations: string[];
   observedAt: string;
-  health?: { remaining: string | null; reset: string | null };
+  health?: {
+    remaining: string | null;
+    reset: string | null;
+    probes?: { route: string; digest: string; etag?: string | null }[];
+  };
 }
 export const fingerprint = (e: Evidence): string => hash({ ...e, observedAt: undefined, health: undefined });
 export interface Batch {
@@ -50,9 +63,19 @@ export function batches(e: Evidence, bound = 22000): Batch[] {
   const parts = [
     {
       path: null as string | null,
-      text: JSON.stringify({ ...e, files: undefined, observedAt: undefined, health: undefined }),
+      text: JSON.stringify({
+        ...e,
+        files: undefined,
+        observedAt: undefined,
+        health: undefined,
+        fileInventory: e.coverage
+          ? e.files.map(({ patch: _patch, source: _source, ...metadata }) => metadata)
+          : undefined,
+      }),
     },
-    ...e.files.filter((f) => f.patch !== undefined).map((f) => ({ path: f.path as string | null, text: f.patch! })),
+    ...e.files
+      .filter((f) => f.patch !== undefined || f.source !== undefined)
+      .map((f) => ({ path: f.path as string | null, text: f.source ? JSON.stringify(f) : f.patch! })),
   ];
   const result: Batch[] = [];
   for (const part of parts) {
@@ -119,6 +142,8 @@ export function validateResult(value: unknown, batch: Batch) {
 }
 export interface Source {
   inventory(repo: string, kind: Kind): Promise<number[]>;
+  changes?(repo: string, kind: Kind, since: string): Promise<number[]>;
+  probe?(evidence: Evidence): Promise<boolean>;
   get(repo: string, kind: Kind, number: number): Promise<Evidence>;
 }
 export interface Account {
@@ -126,6 +151,7 @@ export interface Account {
   model: string;
   endpoint: string;
   keyEnv: string;
+  leaseKey?: string;
 }
 export interface ModelResult {
   value: unknown;
