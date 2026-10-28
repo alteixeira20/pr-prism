@@ -1,0 +1,252 @@
+# V5 upstream readiness acceptance
+
+Decision: **GO for a later local fork-main fast-forward on Node 22+ and GO for opening one upstream PR.**
+This is a source-candidate acceptance, not authorization to merge, push, open that PR or publish.
+The upstream PR must explicitly disclose the deliberate minimum-Node increase from upstream's
+`>=20.0.0` to `>=22.0.0`. Node 20 is diagnostic only, not a supported SDK deployment target.
+No unresolved P0, build, ancestry or CLI-routing blocker remains in the tested candidate.
+
+## Provenance and ancestry
+
+- Source V5: `887ee7375034eef0e201fb191b0acab5c0c8fdda`.
+- Fetched upstream: `12c8ef11d2cf4cb1e0ed79200cf5b44ee0a70e3c`.
+- Fetched fork main and local main: `e606690b7aa8e3f8a1304a72ce8c0dd43bb56a0c`.
+- Hardening branch: `harden/v5-upstream-ready-2026-10-28`.
+- Worktree: `/home/alteixeira20/Projects/pr-prism-v5-upstream-ready`.
+- Tested runtime commit: `bb3014a58a295e02b36499681de3d0dc4e8bd850` (parent is exact source V5 above).
+- Final acceptance HEAD is the documentation-only child of that runtime commit. Resolve its exact
+  SHA with `git rev-parse harden/v5-upstream-ready-2026-10-28`; the final handoff and private
+  `final-state.json` pin it explicitly, avoiding a self-referential hash in this document.
+
+Both remote fetches exited 0. `git merge-base --is-ancestor` returned 0 for upstream, fork main
+and source V5 against the candidate. At preflight, `upstream/main...V5` was `0 47`,
+`origin/main...upstream/main` was `0 20`, and `origin/main...V5` was `0 67`.
+The twenty commits were already contained in V5. No remerge or rebase occurred, no conflicts
+were introduced, and all original history remains intact. With the runtime and report commits,
+the final candidate is 49 ahead / 0 behind upstream and 69 ahead / 0 behind fork main.
+
+Conflict resolution table: **none**; no divergent history needed merging. The corrected mission
+was executed from V5, rather than manufacturing a merge of already-contained upstream commits.
+
+Final cumulative diffstat against upstream: `182 files changed, 44679 insertions(+), 2141 deletions(-)`.
+The complete per-file inventory and original 47-commit history are recorded privately in
+`file-audit.csv`, `47-commits.txt`, and `accepted-cumulative.patch`.
+
+## Cumulative audit and upstream-facing changelog
+
+The audit covered the complete original ahead history and changed-file inventory, with targeted
+source examination of integration boundaries and executable regression coverage across the tree.
+It does not claim live GitHub/provider validation. The 47 commits include several merge commits;
+47 commits do not mean 47 independent product features.
+
+| Scope across the cumulative candidate | Files | Audit / preservation evidence |
+| --- | ---: | --- |
+| CLI and GitHub module extraction, bounded feeds | 53 | Single command registration factory; original CLI options retained; GraphQL, REST normalization, retries and write-gate regressions |
+| Optional advisory Jev decisions | 12 | Disabled by default; conservative routing, schema, sanitizer and assessment tests; SDK engine requirement made explicit |
+| V4 maintainer and housekeeping workflows | 23 | Relationships, closure verification, prioritization, worklists, drafts, human-confirmed action gates and end-to-end workflow tests |
+| V4 grounded reviews and durable scheduler | 8 | Optional dedicated PR/issue schemas, account leases, budgets and resume tests |
+| V5 durable operations | 6 | Dedicated SQLite database, immutable checkpoints, source manifests, bounded attempts, crash recovery and hardened inventory |
+| Regression fixtures | 48 | All 36 upstream test files remain; no test skips or recovery cases removed |
+| Documentation and historical reports | 17 | Historical acceptance marked superseded; new design, compatibility and final evidence |
+| Integration/config/export/package/support files | 15 | Metadata provenance preservation, isolated data-directory selection, Node matrix and package whitelist |
+
+Upstream `src/embeddings.ts`, `cluster.ts`, `relations.ts`, `incident.ts`, `scorer.ts`,
+`identity.ts`, `benchmark.ts` and `housekeeping.ts` have identical Git blob identities to upstream.
+The geometry fix, complete duplicate candidate search, bot filtering, OpenAI-compatible embedding
+endpoints/task prefixes, relationship semantics and incident ranking remain intact. CLI extraction
+is backed by characterization and compiled command tests. Pipeline/server metadata changes retain
+high-fidelity fields when lower-fidelity REST observations arrive. Existing V4 action adapters
+remain explicitly gated; V5 adds no GitHub mutation transport. No needed module or historical branch
+was removed to reduce PR size. The cumulative PR remains large and needs feature-grouped review.
+
+## Hardening changes and evidence boundaries
+
+- `src/review-operations/github.ts:106`: paginated listing responses supply metadata-only evidence
+  with an explicit limitation and `inventoryOnly`. Metadata/detail comparison hashes shared mutable
+  fields; it does not treat absent conversation reads as verification. Inventory/changes retain
+  complete Link pagination, duplicate checks, PR filtering and overlapping update feeds.
+- `src/review-operations/runner.ts:19`: reconciliation consumes listing metadata rather than full
+  `get()` evidence. Two full inventories bracket membership; only previously open items missing
+  from a listing need targeted metadata. Already closed history is not repeatedly fetched.
+- Periodic probes rotate over at most 100 previously hydrated open items per invocation. The durable
+  `probeAfter` cursor prevents starvation; a 251-item fixture covers all items over three invocations
+  with exactly 300 probe calls. Changed/deleted comments or linked-fix observations supersede full
+  evidence with a pending inventory record, retaining historical jobs/checkpoints.
+- `src/review-operations/runner.ts:206`: selected jobs hydrate full evidence, then use the original
+  authoritative revalidation before every reservation and finalization. Incomplete source coverage
+  becomes partial with **zero new reservations**. Full PR merge-base/tree/blob checks, exact UTF-8
+  bytes, renames, large patches, batch hashes and durable manifest checks remain required.
+- `src/review-operations/github.ts:43`: 403/429 fail closed with the later of reset, Retry-After and
+  a sixty-second minimum cooldown. Reconciliation and selected hydration persist the cooldown;
+  a fresh CLI/client respects it without making another HTTP call. Reliable cursors never advance
+  after failed scans. There is no automatic retry loop or blocking sleep. Permission errors also
+  require operator diagnosis rather than being assumed transient.
+- `src/review-operations/store.ts:414`: status exposes inventory-only open items and observation-based
+  freshness. Both ETAs are N/A while full evidence sizes remain unknown. No SQLite schema/ledger
+  rewrite or V4 database reinterpretation was introduced. Full evidence fingerprints and batch hashes
+  are unchanged: the new metadata digest is under excluded `health`, so matching native checkpoints
+  remain reusable without rebilling. Legacy unproven source coverage stays advisory.
+
+## CLI and runtime compatibility
+
+| Invocation | Behavior |
+| --- | --- |
+| `review --queue-db PATH --status --json` | Existing V4 queue status; no inference |
+| `review --operations --status --repo OWNER/REPO --type issue --json` | V5 read-only inspection, no credentials required |
+| `review --operations-db PATH --status --repo OWNER/REPO` | Explicit V5 database also selects V5 |
+| `review --status` | Selector error before credential/config loading; no silent V5 takeover |
+| `review --dashboard ...`, `review --recover ...` | Explicit V5 modes; inspection is read-only and recovery is offline |
+| `review --all-open --dry-run ...` | Metadata inventory only; ignores provider-account configuration, zero paid calls |
+| `review --all-open --max-new-calls N ...` | Explicit bounded review, optional for both PRs and issues |
+
+`src/cli/commands/review.ts:63` selects V5 explicitly. `src/review-operations/cli.ts:50` rejects
+mixed V4/V5 modes, multiple operation modes, execution flags during inspection/recovery and
+acknowledgement outside recovery. Single-item V4 review, history, top-N, scan, dupes and
+`--housekeeping` remain available. Default `--type pr` is retained. Issue classification through
+scan/embeddings does not initialize a deep reviewer or require a per-issue LLM call.
+
+Engine decision: **declare `>=22.0.0` consistently in package and lockfile**, matching the already
+included `@typesafe-ai/sdk@0.7.0` engine and V4 runtime documentation. No dependency versions changed.
+Node 20.0.0 was downloaded from the official Node distribution and SHA-256 verified:
+`9e512f1f1cadb3a5e37a10aa2d5e632f93aaf9f37165803e2ed981009970a3d7`.
+Its controlled dispatch probe fails with `AbortSignal.any is not a function`, with zero network calls.
+Node 20.20.2 passes the offline diagnostic suite, but emits the expected root/SDK engine warnings.
+That does not establish supported SDK operation on Node 20. No unsupported `>=20.0.0` claim remains,
+and no claim is made that 20.20 was the true language/API minimum. The Node support reduction is an
+explicit upstream-facing compatibility change, rather than collateral metadata drift. An upstream
+maintainer wishing to retain Node 20 must resolve the SDK support contract separately; this candidate
+is accepted for Node 22+ only. Package name/version stay `prism-triage@4.0.0`; release versioning is
+for the eventual release process, not an unrequested publication in this branch.
+
+## Measured API scaling
+
+`src/__tests__/review-operations-scaling.test.ts` instruments every GET by route. The independent
+installed-CLI transport in `scripts/upstream-ready-package-smoke.mjs` repeats cold and warm scans
+against the real compiled installed executable, with unexpected destinations/methods rejected.
+
+| Scenario | 1,158 issues | 451 PRs |
+| --- | ---: | ---: |
+| Cold `--all-open --dry-run` GETs | 24 | 10 |
+| Listing pages per inventory | 12 | 5 |
+| Warm unchanged feed, no hydrated evidence | 1 | 1 |
+| One-item metadata update feed | 1 | 1 |
+| Selected full evidence hydration | 6 | 10 |
+| Changed-conversation full hydration | 6 | 10 |
+| Paid calls / reservations during cold or warm dry-run | 0 | 0 |
+| Status/dashboard/recovery remote calls | 0 | 0 |
+
+The PR selection fixture has zero changed files (10 mutable/comparison GETs); separate integrity
+fixtures and the installed package review fixture prove real checksum-backed old/new blobs,
+source manifests and two fake review batches. Nonempty PR hydration adds file/tree/blob requests
+and can require multiple pages/batches. Ordinary issue selection still costs six GETs plus
+pagination/linked fixes; those checks were not removed. Original eager ordinary-issue collection
+alone would require at least 6,948 requests before listing overhead.
+
+The issue endpoint can include PR records: a real mixed repository may need more than twelve pages
+for 1,158 issues. Measured costs are for these synthetic route fixtures, not a promise of identical
+live totals. Completed items also incur periodic mutable probe costs. The 100-item bound is an item
+bound, not a global HTTP quota: comments/reviews/files can span multiple pages. With 1,158 hydrated
+items, a complete round needs at least twelve successful due invocations. Rate-limit cooldowns and
+freshness timestamps remain necessary; no perpetual-freshness or unlimited-throughput claim is made.
+
+Fixtures also cover close/reopen/head/body drift, deleted comments without an updated timestamp,
+linked-fix merge invalidation, unsafe/repeated/skipped pagination, interrupted scans with unchanged
+reliable cursors, membership movement, 403/429 durable cooldown and source/checkpoint tampering.
+
+## Final validation
+
+| Check | Node 24.22.0 | Node 22.23.4 | Node 20.20.2 (diagnostic) |
+| --- | --- | --- | --- |
+| Clean npm ci | PASS, exit 0 | PASS, exit 0 | PASS, exit 0, expected engine warnings |
+| Full npm run ci | PASS, exit 0 | PASS, exit 0 | PASS, exit 0 |
+| Build / lint / typecheck | PASS / PASS / PASS | PASS / PASS / PASS | PASS / PASS / PASS |
+| Test files / tests | 78 / 1,200 | 78 / 1,200 | 78 / 1,200 |
+| Failed / skipped tests | 0 / 0 | 0 / 0 | 0 / 0 |
+| npm pack dry-run / tarball / clean install | PASS / PASS / PASS | PASS / PASS / PASS | PASS / PASS / PASS |
+| Installed source-backed review fixture | PASS, 2 fake attempts | PASS, 2 fake attempts | PASS, 2 fake attempts |
+| Installed scan/dupes/housekeeping/legacy/V5/scaling/error fixture | PASS | PASS | PASS |
+
+All 27 final matrix steps exited 0. Biome checked 201 files. The twelve added hardening tests bring
+the original 1,188 tests to 1,200; no original recovery tests were changed. The three pre-report
+archives were byte-identical, 393 files, SHA-256
+`c6aebac0c761030a9bb2d0b4b8244f423ec63b062c5981b4f2d493776dae6233`.
+This hash identifies the runtime validation package before the completed acceptance report was
+inserted. The final report-bearing archive is separately pinned by `report-package-checks.json`.
+Its runtime JS is compared byte-for-byte with the validated archives and both installed smoke
+helpers are rerun. The final package contains 393 files and retains the unchanged name/version.
+
+Every runtime uses fresh `npm ci`, full `npm run ci` (build, lint, both TypeScript projects,
+complete Vitest suite, compiled version/help), package dry-run/pack, a fresh tarball-install project,
+and both installed CLI smoke helpers. Runtime tests use an empty credential environment and
+`bwrap --unshare-net`; `/home` is hidden except for the isolated development worktree. No real
+provider/GitHub application request can leave the namespace. The explicit numeric-IP control
+reports kernel `ENETUNREACH`. Public npm/runtime downloads happen only during installation.
+
+The original sixteen recovery tests are preserved, including all eleven actual SIGKILL boundaries,
+three competing OS processes with shared budgets/accounts, source sentinels, uncertain-charge
+non-retry, schema-5 backup/checkpoint identity and stale-owner fencing. No exactly-once remote
+execution claim is made. Partial-source tests now additionally assert zero reservations.
+
+Package contents are restricted to compiled JS/declarations/maps, package metadata, examples,
+license and the named public documentation. Tests, SQLite databases, logs, tarballs, real `.env`
+and external operator artifacts are absent. The current report is included; historical V5 acceptance
+is explicitly marked superseded. Final report-only package refresh is recorded separately so its
+archive hash is not confused with the pre-report validation archive.
+
+Private evidence: `/tmp/prism-v5-hardening-evidence` (mode 0700, outside Git). Authoritative final
+runtime logs use `accepted-*`; older `ci-*`/`final-*` logs are intermediate evidence, not the final gate.
+`accepted-matrix.json` records step exit codes. `file-audit.csv`, `preserved-upstream-blobs.json`,
+`test-preservation.json`, `node20.0-dispatch-probe.json`, `kernel-denial.json`, final package metadata,
+and `final-state.json` support independent review. Helpers and regression tests are committed;
+private logs contain only synthetic data and are not packaged or committed.
+
+## Remaining limits and non-mutation
+
+- Binary/non-UTF-8/submodule, unavailable/oversized objects and incomplete GitHub inventories remain
+  partial; full text/source coverage is never fabricated or paid for as complete evidence.
+- GitHub reads are not a transaction. Current means the recorded authoritative observation; scans
+  and rotating probes are bounded polling, with explicitly delayed freshness for large hydrated sets.
+- An uncertain paid attempt retains its charge and blocks automatic retry/account reuse until
+  explicit acknowledgement. Checkpoint/export durability does not prove remote exactly-once work.
+- V5 does not import the external Python reviews of 451 PRs and cannot claim reuse of those paid
+  reviews. No automatic import, production migration, GitHub posting/approval/merge/close or billing
+  occurred. Review drafts and source backups remain untouched.
+- Node 20 is outside the declared deployment contract; Node 22+ is required. Opening the upstream
+  PR is a proposal of that explicit compatibility change, not a claim that upstream has accepted it.
+- The full cumulative PR is intentionally broad because it includes the completed V4 foundation.
+  There are no unresolved merge conflicts. The tests establish deterministic offline behavior,
+  not live provider quality, GitHub freshness for a real backlog or production performance.
+
+The source V5 branch/worktree remains clean at the expected SHA. Other worktrees, historical
+branches, fork main and production artifacts were not changed. Odysseus was not inspected, stopped,
+restarted or migrated. No push, PR creation, release, npm publication or paid request occurred.
+
+## Subsequent manual commands — do not execute without later authorization
+
+These commands assume the named promotion path does not exist and main is not checked out elsewhere.
+They guard both remote ancestry and the tested runtime parent. Stop on any failed guard. They are
+instructions for the operator; none was executed during acceptance.
+
+```sh
+cd /home/alteixeira20/Projects/pr-prism-v5-upstream-ready
+candidate=$(git rev-parse harden/v5-upstream-ready-2026-10-28)
+test "$(git rev-parse "$candidate^")" = bb3014a58a295e02b36499681de3d0dc4e8bd850
+test "$(git diff --name-only bb3014a58a295e02b36499681de3d0dc4e8bd850 "$candidate")" = V5_UPSTREAM_READY_ACCEPTANCE.md
+test -z "$(git status --porcelain)"
+git fetch --no-write-fetch-head upstream main
+git fetch --no-write-fetch-head origin main
+test "$(git rev-parse upstream/main)" = 12c8ef11d2cf4cb1e0ed79200cf5b44ee0a70e3c
+test "$(git rev-parse origin/main)" = e606690b7aa8e3f8a1304a72ce8c0dd43bb56a0c
+test "$(git rev-parse main)" = e606690b7aa8e3f8a1304a72ce8c0dd43bb56a0c
+git merge-base --is-ancestor upstream/main "$candidate"
+git merge-base --is-ancestor main "$candidate"
+test ! -e /home/alteixeira20/Projects/pr-prism-v5-main-promotion
+git worktree add /home/alteixeira20/Projects/pr-prism-v5-main-promotion main
+git -C /home/alteixeira20/Projects/pr-prism-v5-main-promotion merge --ff-only "$candidate"
+# Separate later authorization for remote changes:
+test "$(git ls-remote origin refs/heads/main | cut -f1)" = e606690b7aa8e3f8a1304a72ce8c0dd43bb56a0c
+git push origin refs/heads/main:refs/heads/main
+gh pr create --repo StressTestor/pr-prism --base main --head alteixeira20:main \
+  --title 'Add V4 maintainer workflows and V5 durable review operations' \
+  --body-file V5_UPSTREAM_READY_ACCEPTANCE.md
+```
