@@ -312,10 +312,17 @@ remediations, and validation evidence without modifying the historical acceptanc
      - `npm pack --dry-run --json`: 389 entries packaged, 0 internal markdown files packaged.
      - Executable smoke: `node dist/cli.js --version` (4.0.0) and `node dist/cli.js --help` exit 0.
 5. **Accurate accounting of test outcomes**:
-   - On hosts with working bubblewrap isolation: 1,203 passed, 0 failed, 0 skipped.
-   - On hosts without bubblewrap isolation: 1,202 passed, 0 failed, 1 explicitly skipped.
-   - Test counts never claim 1,200 (or 1,203) passed when the OS isolation test was skipped.
-6. **Non-claims and boundaries**:
+   - On hosts with working bubblewrap isolation: 1,206 passed, 0 failed, 0 skipped.
+   - On hosts without bubblewrap isolation: 1,205 passed, 0 failed, 1 explicitly skipped.
+   - Test counts never claim 1,200 (or 1,206) passed when the OS isolation test was skipped.
+6. **Remote CI verification on GitHub Actions**:
+   - Workflow run: `https://github.com/alteixeira20/pr-prism/actions/runs/40777726306` (run ID: `40777726306`)
+   - Trigger commit: `53827651e117f8ff10f533b165757e57adcce5df`
+   - Job outcomes:
+     - `build (22.x)`: SUCCESS (Node 22.x matrix build, lint, typecheck, test with 1 explicit Vitest skip for unavailable bwrap, CLI smoke)
+     - `build (24.x)`: SUCCESS (Node 24.x matrix build, lint, typecheck, test with 1 explicit Vitest skip for unavailable bwrap, CLI smoke)
+     - `linux-sandbox-verification`: SUCCESS (`ubuntu-22.04` runner with package-installed bubblewrap; capability probe passed; `STRICT_NETWORK_ISOLATION=1` executed and passed all 4 kernel isolation controls: DNS denial, TCP `ENETUNREACH`, child subprocess namespace inheritance, and isolated CLI `--version`)
+7. **Non-claims and boundaries**:
    - No live provider or live GitHub workload verification is performed or claimed.
    - No remote exactly-once execution is claimed.
    - Node >=22 compatibility contract is enforced and documented.
