@@ -41,11 +41,7 @@
     ".env.example",
     "prism.config.yaml",
     "README.md",
-    "LICENSE",
-    "V5_UPSTREAM_READY_ACCEPTANCE.md",
-    "V5_REVIEW_OPERATIONS_DESIGN.md",
-    "V5_REVIEW_OPERATIONS_ACCEPTANCE.md",
-    "V5_REVIEW_OPERATIONS_IMPORT_PLAN.md"
+    "LICENSE"
   ],
   "keywords": [
     "github",
