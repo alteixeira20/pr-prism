@@ -40,15 +40,12 @@ jobs:
 
   linux-sandbox-verification:
     # Verify real OS-level network isolation on a capable Linux runner.
-    # Runs only on ubuntu-latest (Linux); bwrap is installed via apt.
+    # Pinned to ubuntu-22.04 runner image where unprivileged user namespaces
+    # are supported without AppArmor namespace restrictions.
+    # Bubblewrap is provisioned through ordinary package installation.
     # STRICT_NETWORK_ISOLATION=1 ensures any inability to establish verified
     # isolation fails the job rather than being silently skipped.
-    #
-    # NOTE: GitHub-hosted ubuntu-latest runners support unprivileged user
-    # namespaces and bubblewrap since approximately late 2023. If this job
-    # fails with "namespace-rejected", the runner image may have changed;
-    # see docs/sandbox-ci.md for fallback guidance.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: build
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
